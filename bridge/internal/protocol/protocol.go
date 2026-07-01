@@ -48,6 +48,21 @@ type Snapshot struct {
 	Sessions []SessionView `json:"sessions"`
 }
 
+// Outbound is a single host -> device message (an RX write on the firmware).
+// The BLE device sends one per changed session (State StateClosed removes it),
+// plus a set_time control message on connect.
+type Outbound struct {
+	SessionID string `json:"session_id,omitempty"`
+	State     string `json:"state,omitempty"`
+	ToolName  string `json:"tool_name,omitempty"`
+	Command   string `json:"command,omitempty"`
+
+	// control message: {"type":"set_time","epoch":…,"tz_offset":…}
+	Type     string `json:"type,omitempty"`
+	Epoch    int64  `json:"epoch,omitempty"`
+	TZOffset int    `json:"tz_offset,omitempty"`
+}
+
 // Decision is a device -> host message: the user's answer on the dial.
 type Decision struct {
 	SessionID string `json:"session_id"`

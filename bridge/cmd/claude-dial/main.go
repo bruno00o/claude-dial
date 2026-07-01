@@ -18,6 +18,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/bruno00o/claude-dial/bridge/internal/ble"
 	"github.com/bruno00o/claude-dial/bridge/internal/daemon"
 	"github.com/bruno00o/claude-dial/bridge/internal/hooks"
 	"github.com/bruno00o/claude-dial/bridge/internal/session"
@@ -66,12 +67,29 @@ func cmdServe(args []string) {
 	port := fs.Int("port", defaultPort(), "port to listen on")
 	timeout := fs.Duration("timeout", 90*time.Second, "how long to wait for the dial before falling back to the terminal")
 	idleAfter := fs.Duration("idle-after", 90*time.Second, "demote a silent working session to idle after this long")
+	useBLE := fs.Bool("ble", false, "also drive a physical M5Stack Dial over BLE")
 	debug := fs.Bool("debug", false, "log every hook event received")
 	_ = fs.Parse(args)
 
 	store := session.New()
 	hub := web.NewHub()
-	d := daemon.New(store, hub, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, Debug: *debug})
+
+	// The web simulator is always available; the BLE Dial joins it if asked for
+	// and reachable. If BLE can't start, we keep going with just the simulator —
+	// the gadget must never take the bridge down (golden rule).
+	var dev daemon.Device = hub
+	bleStatus := "off (--ble to enable)"
+	if *useBLE {
+		bleStatus = "scanning…"
+		if bd, err := ble.New(*debug); err != nil {
+			fmt.Fprintln(os.Stderr, "ble: disabled:", err)
+			bleStatus = "unavailable: " + err.Error()
+		} else {
+			dev = daemon.NewFanout(hub, bd)
+		}
+	}
+
+	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, Debug: *debug})
 
 	mux := http.NewServeMux()
 	hub.RegisterRoutes(mux)
@@ -79,8 +97,9 @@ func cmdServe(args []string) {
 
 	addr := fmt.Sprintf("localhost:%d", *port)
 	fmt.Printf("claude-dial %s\n", version)
-	fmt.Printf("  bridge   http://%s/hook\n", addr)
+	fmt.Printf("  bridge    http://%s/hook\n", addr)
 	fmt.Printf("  simulator http://%s/\n", addr)
+	fmt.Printf("  dial      %s\n", bleStatus)
 	fmt.Printf("  fallback  terminal prompt after %s with no dial\n", *timeout)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		fmt.Fprintln(os.Stderr, "serve:", err)

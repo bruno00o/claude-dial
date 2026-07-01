@@ -78,15 +78,18 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 	return d
 }
 
-// sweep periodically heals stale session state (see session.Store.Sweep). It
-// ticks frequently so a blocked session clears promptly after an answer.
+// sweep periodically heals stale session state (see session.Store.Sweep) and
+// re-broadcasts. It ticks frequently so a blocked session clears promptly after
+// an answer; broadcasting every tick (not just on change) also lets a device
+// that just (re)connected — e.g. the BLE Dial after a reconnect — catch up to
+// the current state within one tick. Devices diff internally, so an unchanged
+// broadcast is cheap.
 func (d *Daemon) sweep(idleAfter, blockedIdleAfter, forgetAfter time.Duration) {
 	tick := time.NewTicker(2 * time.Second)
 	defer tick.Stop()
 	for range tick.C {
-		if d.store.Sweep(idleAfter, blockedIdleAfter, forgetAfter) {
-			d.broadcast()
-		}
+		d.store.Sweep(idleAfter, blockedIdleAfter, forgetAfter)
+		d.broadcast()
 	}
 }
 

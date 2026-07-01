@@ -52,6 +52,21 @@ click **Allow once / Always allow / Reject** and watch the session continue.
 
 Remove the hooks anytime: `claude-dial hooks uninstall --write`.
 
+### With the physical Dial (BLE)
+
+Flash `firmware/` to an M5Stack Dial, then add `--ble`:
+
+```sh
+./bin/claude-dial serve --ble --debug
+#   dial      scanning…   → connects to the Dial advertising the service UUID
+```
+
+The simulator and the Dial run together (state mirrors to both, decisions merge
+from either). BLE starts fully in the background: if Bluetooth is off, denied,
+or no Dial is around, the bridge runs normally on the simulator alone — the
+gadget never blocks startup. BLE needs cgo (CoreBluetooth on macOS); on first
+run macOS asks for Bluetooth permission.
+
 ## Protocol
 
 Host → device and device → host share one JSON contract
@@ -83,7 +98,7 @@ Early scaffold. Working today:
 - [x] Golden-rule fallback (daemon down → terminal; no dial → `ask`; timeout → `ask`)
 - [x] Web simulator (round screen, live sessions, tactile approve/deny)
 - [x] `hooks install/uninstall` for `~/.claude/settings.json`
-- [ ] BLE `Device` implementation (talk to the real M5Stack Dial)
+- [x] BLE `Device` (`--ble`) to drive the real M5Stack Dial — compiles; needs on-device testing
 - [ ] Firmware polish (`firmware/`, draft included)
 - [ ] `always_allow` → persistent permission rule
 - [ ] Usage / limits view (see below)
