@@ -51,6 +51,8 @@ type Device struct {
 	rxChar    bluetooth.DeviceCharacteristic
 	hasRX     bool
 	connected bool
+	conn      bluetooth.Device // current connection, for forcing a reconnect
+	hasConn   bool
 	last      map[string]protocol.SessionView
 
 	pending   chan protocol.Snapshot // coalescing hand-off to the writer goroutine
@@ -125,12 +127,19 @@ func (d *Device) run() {
 			continue
 		}
 
+		d.mu.Lock()
+		d.conn, d.hasConn = device, true
+		d.mu.Unlock()
+
 		d.setConnected(true)
 		d.sendTime()
 		d.logf("connected to dial")
 
 		<-disconnected
 		d.setConnected(false)
+		d.mu.Lock()
+		d.hasConn = false
+		d.mu.Unlock()
 		d.logf("dial disconnected; rescanning")
 	}
 }
@@ -216,24 +225,47 @@ func (d *Device) Update(snap protocol.Snapshot) {
 	}
 }
 
-// writer serializes all BLE writes off the caller's goroutine.
+// writer serializes all BLE writes off the caller's goroutine. When writes stay
+// wedged (the TX buffer never drains — each WriteWithoutResponse then blocks for
+// seconds before failing), it forces a reconnect to clear the link rather than
+// leaving the Dial frozen on a stale view.
 func (d *Device) writer() {
+	fails := 0
 	for snap := range d.pending {
-		d.flush(snap)
+		if d.flush(snap) {
+			fails = 0
+			continue
+		}
+		if fails++; fails >= 2 {
+			d.logf("BLE writes wedged; forcing a reconnect")
+			d.resetLink()
+			fails = 0
+		}
+	}
+}
+
+// resetLink drops the current connection so run() rescans and reconnects with a
+// fresh, uncongested link. Safe to call from the writer goroutine.
+func (d *Device) resetLink() {
+	d.mu.Lock()
+	c, ok := d.conn, d.hasConn
+	d.mu.Unlock()
+	if ok {
+		_ = c.Disconnect()
 	}
 }
 
 // flush diffs the snapshot against what the Dial last confirmed and writes only
-// the changes. It runs solely on the writer goroutine. Crucially, d.last records
-// only what actually landed: a session is marked delivered *after* a successful
-// write, so a dropped update (e.g. a full TX buffer) is re-attempted on the next
-// broadcast instead of being silently assumed sent — which would freeze the
-// Dial on a stale state until that session changed again.
-func (d *Device) flush(snap protocol.Snapshot) {
+// the changes, returning whether every write landed. It runs solely on the
+// writer goroutine. Crucially, d.last records only what actually landed: a
+// session is marked delivered *after* a successful write, so a dropped update
+// (e.g. a full TX buffer) is re-attempted on the next broadcast instead of being
+// silently assumed sent — which would freeze the Dial on a stale state.
+func (d *Device) flush(snap protocol.Snapshot) bool {
 	d.mu.Lock()
 	if !d.connected {
 		d.mu.Unlock()
-		return
+		return true // run() owns reconnect while down; not a write failure
 	}
 	prev := maps.Clone(d.last)
 	d.mu.Unlock()
@@ -244,19 +276,22 @@ func (d *Device) flush(snap protocol.Snapshot) {
 		cur[s.SessionID] = s
 	}
 
+	ok := true
 	// Sessions that vanished -> tell the Dial to drop them.
 	for id := range prev {
-		if _, ok := cur[id]; !ok {
+		if _, exists := cur[id]; !exists {
 			if d.write(protocol.Outbound{SessionID: id, State: protocol.StateClosed}) {
 				d.mu.Lock()
 				delete(d.last, id)
 				d.mu.Unlock()
+			} else {
+				ok = false
 			}
 		}
 	}
 	// New or changed sessions -> push them; record only on success.
 	for _, s := range cur {
-		if p, ok := prev[s.SessionID]; !ok || p != s {
+		if p, exists := prev[s.SessionID]; !exists || p != s {
 			if d.write(protocol.Outbound{
 				SessionID: s.SessionID,
 				Project:   s.Project,
@@ -267,9 +302,12 @@ func (d *Device) flush(snap protocol.Snapshot) {
 				d.mu.Lock()
 				d.last[s.SessionID] = s
 				d.mu.Unlock()
+			} else {
+				ok = false
 			}
 		}
 	}
+	return ok
 }
 
 // Connected reports whether a Dial is currently connected. Implements
@@ -291,10 +329,12 @@ func (d *Device) sendTime() {
 	d.write(protocol.Outbound{Type: "set_time", Epoch: now.Unix(), TZOffset: offset})
 }
 
-// write pushes one message to the Dial, returning whether it landed. The BLE TX
-// buffer fills under bursts ("timed out waiting for buffer space"); that error
-// is transient, so we retry briefly. This runs on the writer goroutine, never a
-// hook handler, so the short sleeps are harmless.
+// write pushes one message to the Dial, returning whether it landed. One attempt
+// only: WriteWithoutResponse itself blocks for seconds when the TX buffer is full
+// ("timed out waiting for buffer space"), so a retry loop here would starve the
+// writer for that long × N. A dropped update is re-sent on the next broadcast
+// (flush records delivery only on success), and a persistently wedged link is
+// reconnected by the writer.
 func (d *Device) write(msg protocol.Outbound) bool {
 	d.mu.Lock()
 	rx, ok := d.rxChar, d.hasRX
@@ -306,14 +346,11 @@ func (d *Device) write(msg protocol.Outbound) bool {
 	if err != nil {
 		return false
 	}
-	for attempt := 0; attempt < 6; attempt++ {
-		if _, err = rx.WriteWithoutResponse(payload); err == nil {
-			return true
-		}
-		d.logf("write (try %d): %v", attempt+1, err)
-		time.Sleep(40 * time.Millisecond)
+	if _, err = rx.WriteWithoutResponse(payload); err != nil {
+		d.logf("write: %v", err)
+		return false
 	}
-	return false
+	return true
 }
 
 func (d *Device) setConnected(v bool) {
