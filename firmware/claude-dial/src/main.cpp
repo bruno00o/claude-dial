@@ -30,7 +30,9 @@
 #include <M5Dial.h>
 #include <NimBLEDevice.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include <time.h>
+#include <ctype.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
@@ -40,26 +42,30 @@
 #define RX_UUID   "12345678-1234-1234-1234-123456789ABD"
 #define TX_UUID   "12345678-1234-1234-1234-123456789ABE"
 
-// ── Colour palette ───────────────────────────────────────────────────────────
-#define COL_BG          0x0A0A0A
-#define COL_RING        0x1E3A5F
-#define COL_ACCENT      0x00BFFF
-#define COL_WHITE       0xFFFFFF
-#define COL_GRAY        0x808080
-#define COL_WORKING     0x00C896
-#define COL_IDLE_SES    0x4488FF
-#define COL_NEEDS_INPUT 0xFFAA00
-#define COL_ALLOW       0x22EE66
-#define COL_REJECT      0xFF3333
-#define COL_ALWAYS      0x44AAFF
-#define COL_CONFIRM_BG  0x003300
+// ── Colour palette ── amber phosphor "terminal" theme (matches the simulator) ──
+// Physical object is orange/grey/black: amber-orange = active, grey = idle,
+// black = background. The 16-bit sprite expects RGB565: LovyanGFX treats a plain
+// integer as a raw 565 value (NOT RGB888), so we convert at compile time — a
+// bare 0xRRGGBB hex renders as the wrong colour (a dark value comes out blue).
+#define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
+
+#define COL_BG          RGB565(0x0A, 0x08, 0x05)   // warm near-black
+#define COL_INK         RGB565(0xE9, 0xE2, 0xD6)   // selected row / command text
+#define COL_DIM         RGB565(0x8A, 0x81, 0x75)   // headers, footers, hints
+#define COL_GRAY        RGB565(0x6F, 0x69, 0x5F)   // idle rows
+#define COL_AMBER       RGB565(0xFF, 0xA6, 0x2B)   // active / accent (the orange)
+#define COL_AMBER_HOT   RGB565(0xFF, 0xC4, 0x6B)   // waiting rows, warnings
+#define COL_RED         RGB565(0xFF, 0x5B, 0x34)   // reject
+#define COL_RING        RGB565(0x2A, 0x23, 0x18)   // dim bezel ring
+#define COL_ARC_OFF     RGB565(0x14, 0x0F, 0x08)   // spent countdown-arc dots
+#define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU };
-enum AppMode  { MODE_CLAUDE, MODE_CLOCK };
+enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK };
 
 struct Session {
   char  session_id[40];
+  char  project[40];    // human-readable name (basename of cwd), for the roster
   char  state[24];      // working | idle | blocked | permission_request
   char  tool_name[40];
   char  command[200];
@@ -91,18 +97,18 @@ static void handleRxMessage(const char* data, uint16_t len);
 static void drawBase();
 static void getTimeStr(char* tBuf, char* dBuf);
 static void drawIdle();
-static void drawClockMode();
 static void drawSessionList();
 static void drawPermission();
 static void drawConfirming();
 static void drawModeMenu();
+static void drawBrightness();
+static void drawClock();
 static void redraw();
 static void handleEncoder(int delta);
 static void handlePress();
 
 // ── App state (all mutated only from loop() context) ─────────────────────────
 static AppState appState = IDLE;
-static AppMode  appMode  = MODE_CLAUDE;
 
 static Session sessions[MAX_SESSIONS];
 static int     sessionCount = 0;
@@ -117,6 +123,10 @@ static int   permChoice = 0;              // 0 allow once | 1 always | 2 reject
 static int   menuChoice = 0;
 static long  lastEncoderPos = 0;
 static int   listScrollOffset = 0;
+
+// Display brightness (0-255), adjustable from the menu, persisted in NVS.
+static uint8_t   brightness = 180;
+static Preferences prefs;
 
 static unsigned long confirmStart = 0;
 static char          confirmMsg[32] = "";
@@ -174,6 +184,15 @@ static int activeSessions() {
   int n = 0;
   for (int i = 0; i < MAX_SESSIONS; i++) if (sessions[i].active) n++;
   return n;
+}
+
+// homeView is the base monitor screen: the roster when any agent exists, else
+// the idle clock. settleHome applies it, but only from a base view — it never
+// pulls you out of a takeover (PERMISSION/CONFIRMING) or a settings screen
+// (MODE_MENU/BRIGHTNESS/CLOCK). One place owns the "roster is home" rule.
+static AppState homeView() { return activeSessions() > 0 ? SESSION_LIST : IDLE; }
+static void settleHome() {
+  if (appState == IDLE || appState == SESSION_LIST) appState = homeView();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -281,6 +300,7 @@ static void handleRxMessage(const char* data, uint16_t len) {
   }
 
   const char* sid   = doc["session_id"] | "";
+  const char* proj  = doc["project"]    | "";
   const char* state = doc["state"]      | "";
   const char* tool  = doc["tool_name"]  | "";
   const char* cmd   = doc["command"]    | "";
@@ -288,12 +308,14 @@ static void handleRxMessage(const char* data, uint16_t len) {
 
   if (strcmp(state, "closed") == 0 || strcmp(state, "done") == 0) {
     removeSession(sid);
+    settleHome();   // roster ↔ clock as the agent count changes
     needsRedraw = true;
     return;
   }
 
   int idx = newSession(sid);
   if (idx < 0) return;
+  if (proj[0]) strlcpy(sessions[idx].project, proj, sizeof(sessions[idx].project));
   strlcpy(sessions[idx].state,     state, sizeof(sessions[idx].state));
   strlcpy(sessions[idx].tool_name, tool,  sizeof(sessions[idx].tool_name));
   strlcpy(sessions[idx].command,   cmd,   sizeof(sessions[idx].command));
@@ -303,8 +325,8 @@ static void handleRxMessage(const char* data, uint16_t len) {
     permEnqueue(sid);
     if (isNew) buzzPending = true;
     if (currentPermSid[0] == 0) permShowNext();
-  } else if (appState == IDLE && appMode == MODE_CLAUDE && activeSessions() > 0) {
-    // stay on idle; status line stays accurate
+  } else {
+    settleHome();   // a live session appeared/changed → show the roster
   }
   needsRedraw = true;
 }
@@ -326,12 +348,23 @@ static void sendDecision(const char* sid, const char* decision) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Drawing
 // ─────────────────────────────────────────────────────────────────────────────
+// Spinner frames for "working" rows — ASCII so they render in the mono font
+// (the built-in fonts are ASCII-only; no braille glyphs on-device).
+static const char SPINNER[4] = { '|', '/', '-', '\\' };
+static uint8_t spinFrame = 0;
+
+// A short, human label for a session: the project name if we have one, else a
+// truncated session id.
+static void sessionLabel(const Session& s, char* out, size_t n) {
+  if (s.project[0]) { strlcpy(out, s.project, n); return; }
+  strlcpy(out, s.session_id, n);
+  if (strlen(s.session_id) > 12 && n > 11) { out[10] = '.'; out[11] = '.'; out[12] = 0; }
+}
+
 static void drawBase() {
   canvas.fillScreen(COL_BG);
   canvas.fillCircle(CX, CY, CR - 1, COL_BG);
-  canvas.drawCircle(CX, CY, CR - 1, COL_RING);
-  canvas.drawCircle(CX, CY, CR - 2, COL_RING);
-  canvas.drawCircle(CX, CY, CR - 3, COL_ACCENT);
+  canvas.drawCircle(CX, CY, CR - 1, COL_RING);   // dim bezel only — no CRT gloss
 }
 
 static void getTimeStr(char* tBuf, char* dBuf) {
@@ -346,108 +379,91 @@ static void drawIdle() {
   getTimeStr(tBuf, dBuf);
 
   canvas.setTextDatum(middle_center);
-  canvas.setTextColor(COL_WHITE, COL_BG);
-  canvas.setFont(&fonts::Orbitron_Light_32);
-  canvas.setTextSize(1);
-  canvas.drawString(tBuf, CX, CY - 14);
-
-  canvas.setFont(&fonts::FreeSans9pt7b);
-  canvas.setTextColor(COL_GRAY, COL_BG);
-  canvas.drawString(dBuf, CX, CY + 20);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.setFont(&fonts::FreeMonoBold18pt7b);
+  canvas.drawString(tBuf, CX, CY - 12);
 
   int act = activeSessions();
   char status[40];
-  if (!bleConnected)      strlcpy(status, "Waiting for Claude", sizeof(status));
-  else if (act > 0)       snprintf(status, sizeof(status), "%d session%s", act, act > 1 ? "s" : "");
-  else                    strlcpy(status, "BLE connected", sizeof(status));
+  if (!bleConnected)      strlcpy(status, "waiting for claude", sizeof(status));
+  else if (act > 0)       snprintf(status, sizeof(status), "%d agent%s", act, act > 1 ? "s" : "");
+  else                    strlcpy(status, "waiting for claude", sizeof(status));
 
-  canvas.setTextColor(bleConnected ? COL_ACCENT : COL_GRAY, COL_BG);
-  canvas.setFont(&fonts::FreeSans9pt7b);
-  canvas.drawString(status, CX, CY + 50);
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString(status, CX, CY + 30);
 
-  canvas.fillCircle(CX, CY + 72, 4, bleConnected ? COL_ACCENT : 0x333333);
-  canvas.pushSprite(0, 0);
-}
-
-static void drawClockMode() {
-  drawBase();
-  char tBuf[12], dBuf[20];
-  getTimeStr(tBuf, dBuf);
-
-  canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::Orbitron_Light_32);
-  canvas.setTextColor(COL_WHITE, COL_BG);
-  canvas.drawString(tBuf, CX, CY - 6);
-
-  canvas.setFont(&fonts::FreeSans9pt7b);
-  canvas.setTextColor(COL_GRAY, COL_BG);
-  canvas.drawString(dBuf, CX, CY + 30);
-
-  auto dt = M5Dial.Rtc.getDateTime();
-  float angle = (dt.time.minutes / 60.0f) * 360.0f - 90.0f;
-  int ax = CX + (int)((CR - 6) * cosf(angle * DEG_TO_RAD));
-  int ay = CY + (int)((CR - 6) * sinf(angle * DEG_TO_RAD));
-  canvas.fillCircle(ax, ay, 5, COL_ACCENT);
+  canvas.fillCircle(CX, CY + 56, 3, bleConnected ? COL_AMBER : COL_RING);
   canvas.pushSprite(0, 0);
 }
 
 static void drawSessionList() {
   drawBase();
+
+  int active[MAX_SESSIONS], n = 0, waits = 0;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (!sessions[i].active) continue;
+    active[n++] = i;
+    if (strcmp(sessions[i].state, "blocked") == 0 ||
+        strcmp(sessions[i].state, "permission_request") == 0) waits++;
+  }
+
+  // header — "N agents" (dim)
+  canvas.setFont(&fonts::FreeMono9pt7b);
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeSans9pt7b);
-  canvas.setTextColor(COL_ACCENT, COL_BG);
-  canvas.drawString("Claude Sessions", CX, 20);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  char hdr[24];
+  snprintf(hdr, sizeof(hdr), "%d agent%s", n, n == 1 ? "" : "s");
+  canvas.drawString(hdr, CX, 40);
 
-  int active[MAX_SESSIONS], n = 0;
-  for (int i = 0; i < MAX_SESSIONS; i++) if (sessions[i].active) active[n++] = i;
-
-  if (n == 0) {
-    canvas.setTextColor(COL_GRAY, COL_BG);
-    canvas.drawString("No active sessions", CX, CY);
+  if (n == 0) {                 // no agents — the daemon switches us back to the clock
     canvas.pushSprite(0, 0);
     return;
   }
 
-  int visible = 4;
+  const int visible = 4;
   if (listScrollOffset > n - visible) listScrollOffset = n - visible;
   if (listScrollOffset < 0) listScrollOffset = 0;
 
-  int startY = 42, rowH = 40;
+  const int startY = 72, rowH = 32;
   for (int row = 0; row < visible && (listScrollOffset + row) < n; row++) {
     Session& s = sessions[active[listScrollOffset + row]];
     int y = startY + row * rowH;
 
-    uint32_t rowCol;
-    if      (strcmp(s.state, "working")            == 0) rowCol = COL_WORKING;
-    else if (strcmp(s.state, "blocked")            == 0) rowCol = COL_NEEDS_INPUT;
-    else if (strcmp(s.state, "permission_request") == 0) rowCol = COL_NEEDS_INPUT;
-    else                                                 rowCol = COL_IDLE_SES;
+    bool working = strcmp(s.state, "working") == 0;
+    bool waiting = strcmp(s.state, "blocked") == 0 ||
+                   strcmp(s.state, "permission_request") == 0;
+    uint32_t col = working ? COL_AMBER : waiting ? COL_AMBER_HOT : COL_GRAY;
 
-    int pw = 160, ph = 30, px = CX - pw / 2, py = y - ph / 2;
-    canvas.fillRoundRect(px, py, pw, ph, 8, rowCol);
+    char glyph[2] = { working ? SPINNER[spinFrame] : waiting ? '*' : '.', 0 };
+    char label[16];
+    sessionLabel(s, label, sizeof(label));
 
-    char shortId[18];
-    strlcpy(shortId, s.session_id, sizeof(shortId));
-    if (strlen(s.session_id) > 10) { shortId[8] = '.'; shortId[9] = '.'; shortId[10] = 0; }
-
-    canvas.setTextColor(COL_BG, rowCol);
+    canvas.setTextColor(col, COL_BG);
     canvas.setTextDatum(middle_left);
-    canvas.drawString(shortId, px + 8, y);
-    canvas.setTextDatum(middle_right);
-    canvas.drawString(s.state, px + pw - 6, y);
+    canvas.drawString(glyph, CX - 88, y);
+    canvas.drawString(label, CX - 70, y);
   }
 
+  // footer — only shown when something actually needs you; silence otherwise
+  if (waits > 0) {
+    canvas.setTextDatum(middle_center);
+    char ft[20]; snprintf(ft, sizeof(ft), "%d waiting", waits);
+    canvas.setTextColor(COL_AMBER_HOT, COL_BG);
+    canvas.drawString(ft, CX, 206);
+  }
+
+  // scroll dots
   if (n > visible) {
     for (int i = 0; i < n; i++) {
-      uint32_t dc = (i == listScrollOffset) ? COL_ACCENT : COL_GRAY;
-      canvas.fillCircle(CX - (n * 6) / 2 + i * 6 + 3, 228, 3, dc);
+      uint32_t dc = (i >= listScrollOffset && i < listScrollOffset + visible) ? COL_AMBER : COL_RING;
+      canvas.fillCircle(CX - (n * 6) / 2 + i * 6 + 3, 226, 2, dc);
     }
   }
   canvas.pushSprite(0, 0);
 }
 
-static const char* choiceLabels[3] = { "Allow once", "Always allow", "Reject" };
-static const uint32_t choiceColors[3] = { COL_ALLOW, COL_ALWAYS, COL_REJECT };
+static const char* choiceLabels[3] = { "allow once", "always allow", "reject" };
 
 static void drawPermission() {
   int idx = findSession(currentPermSid);
@@ -455,113 +471,163 @@ static void drawPermission() {
   Session& s = sessions[idx];
 
   drawBase();
-  canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeSans9pt7b);
-  canvas.setTextColor(COL_NEEDS_INPUT, COL_BG);
-  canvas.drawString("Permission request", CX, 18);
+  canvas.setFont(&fonts::FreeMono9pt7b);
 
-  // "+N" badge if more are queued behind this one
-  if (permQueueCount > 0) {
-    char more[12];
-    snprintf(more, sizeof(more), "+%d", permQueueCount);
-    canvas.setTextColor(COL_GRAY, COL_BG);
-    canvas.setTextDatum(middle_right);
-    canvas.drawString(more, CX + 96, 18);
-    canvas.setTextDatum(middle_center);
-  }
-
-  canvas.setTextColor(COL_WHITE, COL_BG);
-  canvas.drawString(s.tool_name, CX, 38);
-
-  char line1[23] = {0}, line2[23] = {0};
-  int cmdLen = strlen(s.command);
-  if (cmdLen <= 22) {
-    strlcpy(line1, s.command, 23);
-  } else {
-    int cut = 22;
-    while (cut > 0 && s.command[cut] != ' ') cut--;
-    if (cut == 0) cut = 22;
-    strlcpy(line1, s.command, cut + 1);
-    strlcpy(line2, s.command + cut + 1, 23);
-  }
-  canvas.setTextColor(COL_GRAY, COL_BG);
-  canvas.drawString(line1, CX, 58);
-  if (line2[0]) canvas.drawString(line2, CX, 74);
-
+  // countdown arc around the rim (subtle ambient timer)
   long remaining = permTimeout - millis();
   if (remaining < 0) remaining = 0;
-  float frac = remaining / 120000.0f;
-  int arcR = 112, arcSteps = (int)(frac * 200);
-  for (int i = 0; i < 200; i++) {
-    float a = (i / 200.0f) * 360.0f - 90.0f;
+  int arcR = 114, arcSteps = (int)((remaining / 120000.0f) * 180);
+  for (int i = 0; i < 180; i++) {
+    float a = (i / 180.0f) * 360.0f - 90.0f;
     int ax = CX + (int)(arcR * cosf(a * DEG_TO_RAD));
     int ay = CY + (int)(arcR * sinf(a * DEG_TO_RAD));
-    canvas.fillCircle(ax, ay, 2, (i < arcSteps) ? COL_ACCENT : 0x1A1A1A);
+    canvas.fillCircle(ax, ay, 1, (i < arcSteps) ? COL_AMBER : COL_ARC_OFF);
   }
 
-  int btnY[3] = { 102, 136, 170 };
+  // project (who) + queue badge
+  char who[16]; sessionLabel(s, who, sizeof(who));
+  canvas.setTextDatum(middle_left);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.drawString(who, CX - 86, 38);
+  canvas.setTextDatum(middle_right);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  if (permQueueCount > 0) {
+    char more[14]; snprintf(more, sizeof(more), "<%d more>", permQueueCount);
+    canvas.drawString(more, CX + 86, 38);
+  } else {
+    canvas.drawString("last", CX + 86, 38);
+  }
+
+  // eyebrow
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(COL_AMBER_HOT, COL_BG);
+  canvas.drawString("permission", CX, 62);
+
+  // "$ tool command" wrapped to two lines
+  char full[240];
+  char tool[40]; strlcpy(tool, s.tool_name, sizeof(tool));
+  for (char* p = tool; *p; p++) *p = tolower(*p);
+  snprintf(full, sizeof(full), "$ %s %s", tool, s.command);
+  const int wrap = 19;
+  char line1[24] = {0}, line2[24] = {0};
+  if ((int)strlen(full) <= wrap) {
+    strlcpy(line1, full, sizeof(line1));
+  } else {
+    int cut = wrap;
+    while (cut > 0 && full[cut] != ' ') cut--;
+    if (cut == 0) cut = wrap;
+    strlcpy(line1, full, cut + 1);
+    strlcpy(line2, full + cut + 1, sizeof(line2));
+  }
+  canvas.setTextColor(COL_INK, COL_BG);
+  canvas.drawString(line1, CX, 90);
+  if (line2[0]) canvas.drawString(line2, CX, 108);
+
+  // choices — mono-aligned, caret ">" on the selected one
+  int btnY[3] = { 150, 176, 202 };
   for (int i = 0; i < 3; i++) {
     bool sel = (i == permChoice);
-    uint32_t bg = sel ? choiceColors[i] : 0x1E1E2E;
-    uint32_t fg = sel ? COL_BG          : choiceColors[i];
-    int bw = 170, bh = 26, bx = CX - bw / 2, by = btnY[i] - bh / 2;
-    if (sel) canvas.fillRoundRect(bx, by, bw, bh, 7, bg);
-    else     canvas.drawRoundRect(bx, by, bw, bh, 7, fg);
-    canvas.setTextColor(fg, sel ? bg : COL_BG);
-    canvas.setTextDatum(middle_center);
-    canvas.drawString(choiceLabels[i], CX, btnY[i]);
+    uint32_t col = !sel ? COL_GRAY : (i == 2 ? COL_RED : COL_AMBER);
+    char row[20];
+    snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", choiceLabels[i]);
+    canvas.setTextColor(col, COL_BG);
+    canvas.drawString(row, CX, btnY[i]);
   }
-
-  canvas.setTextColor(COL_GRAY, COL_BG);
-  canvas.drawString("rotate / push", CX, 210);
   canvas.pushSprite(0, 0);
 }
 
 static void drawConfirming() {
-  canvas.fillScreen(COL_CONFIRM_BG);
-  canvas.fillCircle(CX, CY, CR - 1, COL_CONFIRM_BG);
+  drawBase();
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::Orbitron_Light_32);
-  canvas.setTextColor(COL_ALLOW, COL_CONFIRM_BG);
-  canvas.drawString("Sent!", CX, CY - 12);
-  canvas.setFont(&fonts::FreeSans9pt7b);
-  canvas.setTextColor(COL_WHITE, COL_CONFIRM_BG);
-  canvas.drawString(confirmMsg, CX, CY + 22);
+  canvas.setFont(&fonts::FreeMonoBold18pt7b);
+  bool rejected = (strcmp(confirmMsg, "reject") == 0);
+  canvas.setTextColor(rejected ? COL_RED : COL_AMBER, COL_BG);
+  canvas.drawString("sent", CX, CY - 12);
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString(confirmMsg, CX, CY + 24);
   canvas.pushSprite(0, 0);
 }
 
-static const char* menuLabels[2] = { "Claude Monitor", "Clock" };
+static const char* menuLabels[] = { "monitor", "brightness", "clock" };
+static const int MENU_N = 3;
+
 static void drawModeMenu() {
   drawBase();
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeSans9pt7b);
-  canvas.setTextColor(COL_ACCENT, COL_BG);
-  canvas.drawString("Mode", CX, 22);
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("settings", CX, 60);
 
-  int btnY[2] = { CY - 20, CY + 20 };
-  for (int i = 0; i < 2; i++) {
+  for (int i = 0; i < MENU_N; i++) {
     bool sel = (i == menuChoice);
-    uint32_t bg = sel ? COL_ACCENT : 0x1E1E2E;
-    uint32_t fg = sel ? COL_BG     : COL_WHITE;
-    int bw = 180, bh = 30, bx = CX - bw / 2, by = btnY[i] - bh / 2;
-    if (sel) canvas.fillRoundRect(bx, by, bw, bh, 8, bg);
-    else     canvas.drawRoundRect(bx, by, bw, bh, 8, COL_GRAY);
-    canvas.setTextColor(fg, sel ? bg : COL_BG);
-    canvas.drawString(menuLabels[i], CX, btnY[i]);
+    int  y   = CY - (MENU_N - 1) * 15 + i * 30;   // centered, 30px apart
+    char row[24];
+    snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", menuLabels[i]);
+    canvas.setTextColor(sel ? COL_AMBER : COL_GRAY, COL_BG);
+    canvas.drawString(row, CX, y);
   }
-  canvas.setTextColor(COL_GRAY, COL_BG);
-  canvas.drawString("rotate / push", CX, 210);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("turn / press", CX, 200);
+  canvas.pushSprite(0, 0);
+}
+
+static void drawBrightness() {
+  drawBase();
+  canvas.setTextDatum(middle_center);
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("brightness", CX, 74);
+
+  char pct[8]; snprintf(pct, sizeof(pct), "%d%%", (brightness * 100) / 255);
+  canvas.setFont(&fonts::FreeMonoBold18pt7b);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.drawString(pct, CX, CY);
+
+  int bw = 150, bh = 8, bx = CX - bw / 2, by = 158;
+  canvas.drawRoundRect(bx, by, bw, bh, 4, COL_RING);
+  canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * brightness / 255, bh - 2, 3, COL_AMBER);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("turn / press", CX, 196);
+  canvas.pushSprite(0, 0);
+}
+
+// A dedicated clock face (date + a minute marker on the rim), distinct from the
+// idle-monitor screen which shows "waiting for claude".
+static void drawClock() {
+  drawBase();
+  char tBuf[12], dBuf[20];
+  getTimeStr(tBuf, dBuf);
+
+  canvas.setTextDatum(middle_center);
+  canvas.setFont(&fonts::FreeMonoBold18pt7b);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.drawString(tBuf, CX, CY - 6);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString(dBuf, CX, CY + 30);
+
+  auto dt = M5Dial.Rtc.getDateTime();
+  float angle = (dt.time.minutes / 60.0f) * 360.0f - 90.0f;
+  int ax = CX + (int)((CR - 6) * cosf(angle * DEG_TO_RAD));
+  int ay = CY + (int)((CR - 6) * sinf(angle * DEG_TO_RAD));
+  canvas.fillCircle(ax, ay, 4, COL_AMBER);
   canvas.pushSprite(0, 0);
 }
 
 static void redraw() {
   needsRedraw = false;
   switch (appState) {
-    case IDLE:         (appMode == MODE_CLOCK) ? drawClockMode() : drawIdle(); break;
+    case IDLE:         drawIdle();         break;
     case SESSION_LIST: drawSessionList(); break;
     case PERMISSION:   drawPermission();  break;
     case CONFIRMING:   drawConfirming();  break;
     case MODE_MENU:    drawModeMenu();    break;
+    case BRIGHTNESS:   drawBrightness();  break;
+    case CLOCK:        drawClock();       break;
   }
 }
 
@@ -580,9 +646,18 @@ static void handleEncoder(int delta) {
       needsRedraw = true;
       break;
     case MODE_MENU:
-      menuChoice = (menuChoice + (delta > 0 ? 1 : -1) + 2) % 2;
+      menuChoice = (menuChoice + (delta > 0 ? 1 : -1) + MENU_N) % MENU_N;
       needsRedraw = true;
       break;
+    case BRIGHTNESS: {
+      int b = (int)brightness + (delta > 0 ? 12 : -12);
+      if (b < 20)  b = 20;
+      if (b > 255) b = 255;
+      brightness = (uint8_t)b;
+      M5Dial.Display.setBrightness(brightness);
+      needsRedraw = true;
+      break;
+    }
     default: break;
   }
 }
@@ -591,10 +666,9 @@ static void handlePress() {
   switch (appState) {
     case IDLE:
     case SESSION_LIST:
-      if (appMode == MODE_CLAUDE) {
-        appState    = (appState == IDLE) ? SESSION_LIST : IDLE;
-        needsRedraw = true;
-      }
+      // Monitor views have nothing to confirm — the roster auto-shows when
+      // agents exist, and permission requests take over the screen on their own.
+      // (Long-press still opens the mode menu.)
       break;
 
     case PERMISSION: {
@@ -621,8 +695,19 @@ static void handlePress() {
       break;
 
     case MODE_MENU:
-      appMode     = (menuChoice == 0) ? MODE_CLAUDE : MODE_CLOCK;
-      appState    = IDLE;
+      if (menuChoice == 0)                          // monitor — back to the main view
+        appState = homeView();
+      else if (menuChoice == 1)                     // brightness
+        appState = BRIGHTNESS;
+      else                                          // clock
+        appState = CLOCK;
+      needsRedraw = true;
+      break;
+
+    case BRIGHTNESS:                               // confirm — persist and back to menu
+      prefs.putUChar("bright", brightness);
+      appState    = MODE_MENU;
+      menuChoice  = 1;
       needsRedraw = true;
       break;
   }
@@ -637,10 +722,13 @@ void setup() {
 
   auto cfg = M5.config();
   M5Dial.begin(cfg, true, false);  // encoder on, RFID off
-  M5Dial.Display.setBrightness(200);
 
+  prefs.begin("cdial", false);
+  brightness = prefs.getUChar("bright", 180);
+  M5Dial.Display.setBrightness(brightness);
+
+  canvas.setColorDepth(16);          // RGB565 — set depth before allocating
   canvas.createSprite(240, 240);
-  canvas.setColorDepth(16);
 
   M5Dial.Rtc.begin();
   memset(sessions, 0, sizeof(sessions));
@@ -695,6 +783,22 @@ void loop() {
     handleRxMessage(msg.data, msg.len);
   }
 
+  // If the host link drops, the session view is no longer trustworthy: the
+  // daemon can't tell us a session went idle while we're disconnected, so a
+  // frozen "working" roster (spinner still turning) would lie. Drop it and fall
+  // back to the clock; a reconnect resyncs the full state within a sweep tick.
+  static bool wasConnected = false;
+  if (wasConnected && !bleConnected) {
+    memset(sessions, 0, sizeof(sessions));
+    sessionCount   = 0;
+    permQueueCount = 0;
+    currentPermSid[0] = 0;
+    if (appState != MODE_MENU && appState != BRIGHTNESS && appState != CLOCK)
+      appState = homeView();   // sessions cleared → clock, unless a settings screen is up
+    needsRedraw = true;
+  }
+  wasConnected = bleConnected;
+
   // Encoder: accumulate counts, step once per detent
   static long encAccum = 0;
   long pos   = M5Dial.Encoder.read();
@@ -702,7 +806,7 @@ void loop() {
   if (delta != 0) {
     lastEncoderPos = pos;
     encAccum += delta;
-    const long ENC_DETENT = 2;   // counts per click; bump to 4 if it scrolls 2 per click
+    const long ENC_DETENT = 4;   // this encoder emits 4 counts per physical detent
     while (encAccum >=  ENC_DETENT) { handleEncoder(+1); encAccum -= ENC_DETENT; }
     while (encAccum <= -ENC_DETENT) { handleEncoder(-1); encAccum += ENC_DETENT; }
   }
@@ -712,9 +816,9 @@ void loop() {
     handlePress();
   }
   if (M5Dial.BtnA.wasHold()) {
-    if (appState != MODE_MENU) {
+    if (appState != MODE_MENU && appState != BRIGHTNESS) {
       appState    = MODE_MENU;
-      menuChoice  = (appMode == MODE_CLAUDE) ? 0 : 1;
+      menuChoice  = 0;
       needsRedraw = true;
     }
   }
@@ -735,13 +839,21 @@ void loop() {
     permShowNext();
   }
 
-  // Periodic clock tick on idle/clock
-  static unsigned long lastTick = 0;
-  if ((appState == IDLE || appState == PERMISSION) && (millis() - lastTick > 10000)) {
-    lastTick = millis(); needsRedraw = true;
+  // Periodic redraws: idle clock (10s), permission countdown arc (1s), and the
+  // roster spinner (~150ms, only while a session is "working").
+  static unsigned long lastSlow = 0, lastFast = 0;
+  if ((appState == IDLE || appState == CLOCK) && millis() - lastSlow > 10000) {
+    lastSlow = millis(); needsRedraw = true;
   }
-  if (appState == PERMISSION && (millis() - lastTick > 1000)) {
-    lastTick = millis(); needsRedraw = true;
+  if (appState == PERMISSION && millis() - lastFast > 1000) {
+    lastFast = millis(); needsRedraw = true;
+  }
+  if (appState == SESSION_LIST && millis() - lastFast > 150) {
+    lastFast = millis();
+    bool anyWorking = false;
+    for (int i = 0; i < MAX_SESSIONS; i++)
+      if (sessions[i].active && strcmp(sessions[i].state, "working") == 0) anyWorking = true;
+    if (anyWorking) { spinFrame = (spinFrame + 1) & 3; needsRedraw = true; }
   }
 
   if (needsRedraw) redraw();
