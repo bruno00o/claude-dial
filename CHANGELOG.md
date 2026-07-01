@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.0](https://github.com/bruno00o/claude-dial/compare/v0.1.0...v0.2.0) (2026-07-01)
+
+
+### Features
+
+* drive the physical M5Stack Dial over BLE ([9e44b36](https://github.com/bruno00o/claude-dial/commit/9e44b369d1e138b75f3b156f131435119607c67a))
+
 ## 0.1.0 (2026-07-01)
 
 
