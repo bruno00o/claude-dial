@@ -53,6 +53,7 @@ type Snapshot struct {
 // plus a set_time control message on connect.
 type Outbound struct {
 	SessionID string `json:"session_id,omitempty"`
+	Project   string `json:"project,omitempty"`
 	State     string `json:"state,omitempty"`
 	ToolName  string `json:"tool_name,omitempty"`
 	Command   string `json:"command,omitempty"`
