@@ -9,6 +9,9 @@
 .DS_Store
 .claude/settings.local.json
 
+# Personal Claude Code project notes (kept local)
+CLAUDE.md
+
 # PlatformIO / firmware
 firmware/**/.pio/
 firmware/**/.vscode/
