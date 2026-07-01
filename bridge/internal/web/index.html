@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>claude-dial · simulator</title>
+<style>
+  :root {
+    --bg: #0a0a0a; --ring: #1e3a5f; --accent: #00bfff;
+    --working: #00c896; --idle: #4488ff; --needs: #ffaa00;
+    --allow: #22ee66; --always: #44aaff; --reject: #ff3333;
+    --gray: #808080; --white: #fff;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #050505; color: var(--white); min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; gap: 22px;
+    padding: 40px 16px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  h1 { font-size: 13px; letter-spacing: 3px; color: var(--gray); font-weight: 500; text-transform: uppercase; }
+  .device { display: flex; flex-direction: column; align-items: center; gap: 16px; }
+  .screen {
+    width: 340px; height: 340px; border-radius: 50%;
+    background: radial-gradient(circle at 50% 40%, #0f0f0f, var(--bg));
+    border: 2px solid var(--ring); box-shadow: 0 0 0 10px #0c0c0c, 0 24px 60px rgba(0,0,0,.6), inset 0 0 40px rgba(0,0,0,.8);
+    position: relative; overflow: hidden;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; padding: 28px;
+  }
+  .screen::after { content: ""; position: absolute; inset: 8px; border-radius: 50%; border: 1px solid rgba(0,191,255,.25); pointer-events: none; }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: #333; position: absolute; bottom: 42px; }
+  .dot.on { background: var(--accent); box-shadow: 0 0 10px var(--accent); }
+  .time { font-size: 40px; font-weight: 300; letter-spacing: 1px; }
+  .sub { font-size: 12px; color: var(--gray); margin-top: 8px; }
+  .status { font-size: 13px; margin-top: 18px; color: var(--accent); }
+  .title { font-size: 12px; color: var(--accent); letter-spacing: 1px; text-transform: uppercase; margin-bottom: 14px; }
+  .list { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+  .row {
+    display: flex; justify-content: space-between; align-items: center;
+    border-radius: 8px; padding: 7px 12px; font-size: 12px; color: #050505; font-weight: 600;
+  }
+  .row .st { font-size: 10px; opacity: .85; }
+  .perm .tool { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+  .perm .cmd { font-size: 12px; color: var(--gray); word-break: break-all; margin-bottom: 16px; max-height: 54px; overflow: hidden; }
+  .btns { display: flex; flex-direction: column; gap: 8px; width: 210px; }
+  button {
+    font-family: inherit; font-size: 12px; font-weight: 600; letter-spacing: .5px;
+    border-radius: 8px; padding: 8px; cursor: pointer; border: 1px solid; background: transparent;
+    transition: transform .05s ease;
+  }
+  button:active { transform: scale(.97); }
+  .b-allow  { color: var(--allow);  border-color: var(--allow); }
+  .b-always { color: var(--always); border-color: var(--always); }
+  .b-reject { color: var(--reject); border-color: var(--reject); }
+  .b-allow:hover  { background: var(--allow);  color: #050505; }
+  .b-always:hover { background: var(--always); color: #050505; }
+  .b-reject:hover { background: var(--reject); color: #050505; }
+  .badge { position: absolute; top: 40px; right: 54px; font-size: 11px; color: var(--gray); }
+  .hint { font-size: 11px; color: #555; }
+  .conn { font-size: 11px; color: var(--gray); display: flex; align-items: center; gap: 6px; }
+  .conn b { color: var(--white); font-weight: 500; }
+</style>
+</head>
+<body>
+  <h1>claude-dial · simulator</h1>
+  <div class="device">
+    <div class="screen" id="screen"></div>
+    <div class="conn">stream <b id="conn">connecting…</b></div>
+  </div>
+  <div class="hint">This page IS the dial. When the daemon is off, Claude Code falls back to the terminal prompt.</div>
+
+<script>
+const screen = document.getElementById("screen");
+const conn = document.getElementById("conn");
+const stateColor = { working: "var(--working)", idle: "var(--idle)", blocked: "var(--needs)", permission_request: "var(--needs)" };
+
+function esc(s) { return (s || "").replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+function clock() {
+  const d = new Date();
+  const p = n => String(n).padStart(2, "0");
+  return { t: p(d.getHours()) + ":" + p(d.getMinutes()), d: d.toISOString().slice(0, 10) };
+}
+
+async function decide(sessionId, decision) {
+  await fetch("/decision", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ session_id: sessionId, decision }),
+  });
+}
+
+function render(snap) {
+  const sessions = (snap && snap.sessions) || [];
+  const pending = sessions.find(s => s.state === "permission_request");
+
+  if (pending) {
+    const others = sessions.filter(s => s.state === "permission_request").length - 1;
+    screen.innerHTML = `
+      ${others > 0 ? `<div class="badge">+${others}</div>` : ""}
+      <div class="perm">
+        <div class="title">Permission request</div>
+        <div class="tool">${esc(pending.tool_name) || "tool"}</div>
+        <div class="cmd">${esc(pending.command)}</div>
+        <div class="btns">
+          <button class="b-allow"  data-d="allow_once">Allow once</button>
+          <button class="b-always" data-d="always_allow">Always allow</button>
+          <button class="b-reject" data-d="reject">Reject</button>
+        </div>
+      </div>`;
+    screen.querySelectorAll("button").forEach(b =>
+      b.onclick = () => decide(pending.session_id, b.dataset.d));
+    return;
+  }
+
+  if (sessions.length > 0) {
+    screen.innerHTML = `
+      <div class="title">Claude sessions</div>
+      <div class="list">
+        ${sessions.map(s => `
+          <div class="row" style="background:${stateColor[s.state] || "var(--idle)"}">
+            <span>${esc(s.project || s.session_id.slice(0, 8))}</span>
+            <span class="st">${esc(s.state)}</span>
+          </div>`).join("")}
+      </div>`;
+    return;
+  }
+
+  const c = clock();
+  screen.innerHTML = `
+    <div class="time">${c.t}</div>
+    <div class="sub">${c.d}</div>
+    <div class="status">Waiting for Claude</div>
+    <div class="dot" id="dot"></div>`;
+}
+
+let last = { sessions: [] };
+render(last);
+
+const ev = new EventSource("/events");
+ev.onopen = () => { conn.textContent = "connected"; conn.style.color = "var(--accent)"; };
+ev.onerror = () => { conn.textContent = "disconnected"; conn.style.color = "var(--reject)"; };
+ev.onmessage = e => { try { last = JSON.parse(e.data); render(last); } catch {} };
+
+// keep the idle clock ticking
+setInterval(() => { if (!last.sessions || last.sessions.length === 0) render(last); }, 15000);
+</script>
+</body>
+</html>

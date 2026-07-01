@@ -1,0 +1,14 @@
+# Go
+/bin/
+*.test
+*.out
+
+# Bridge / editor
+*.bak
+.env
+.DS_Store
+.claude/settings.local.json
+
+# PlatformIO / firmware
+firmware/**/.pio/
+firmware/**/.vscode/
