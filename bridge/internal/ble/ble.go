@@ -14,6 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"maps"
 	"sync"
 	"time"
 
@@ -52,6 +53,7 @@ type Device struct {
 	connected bool
 	last      map[string]protocol.SessionView
 
+	pending   chan protocol.Snapshot // coalescing hand-off to the writer goroutine
 	decisions chan protocol.Decision
 }
 
@@ -78,9 +80,11 @@ func New(debug bool) (*Device, error) {
 		tx:        tx,
 		debug:     debug,
 		last:      map[string]protocol.SessionView{},
+		pending:   make(chan protocol.Snapshot, 1),
 		decisions: make(chan protocol.Decision, 32),
 	}
 	go d.run()
+	go d.writer()
 	return d, nil
 }
 
@@ -197,37 +201,73 @@ func (d *Device) onNotify(buf []byte) {
 	}
 }
 
-// Update pushes changed sessions to the Dial. Implements daemon.Device.
+// Update hands the latest snapshot to the writer goroutine. Implements
+// daemon.Device. It never blocks: a slow BLE link must not stall the caller,
+// which is often a Claude Code hook waiting on the daemon's HTTP response
+// (otherwise the hook times out). Only the newest snapshot is kept — older
+// pending ones are dropped, since each snapshot is the full current state.
 func (d *Device) Update(snap protocol.Snapshot) {
+	for {
+		select {
+		case d.pending <- snap:
+			return
+		case <-d.pending: // buffer full: drop the stale snapshot and retry
+		}
+	}
+}
+
+// writer serializes all BLE writes off the caller's goroutine.
+func (d *Device) writer() {
+	for snap := range d.pending {
+		d.flush(snap)
+	}
+}
+
+// flush diffs the snapshot against what the Dial last confirmed and writes only
+// the changes. It runs solely on the writer goroutine. Crucially, d.last records
+// only what actually landed: a session is marked delivered *after* a successful
+// write, so a dropped update (e.g. a full TX buffer) is re-attempted on the next
+// broadcast instead of being silently assumed sent — which would freeze the
+// Dial on a stale state until that session changed again.
+func (d *Device) flush(snap protocol.Snapshot) {
 	d.mu.Lock()
 	if !d.connected {
 		d.mu.Unlock()
 		return
 	}
-	prev := d.last
+	prev := maps.Clone(d.last)
+	d.mu.Unlock()
+
 	cur := make(map[string]protocol.SessionView, len(snap.Sessions))
 	for _, s := range snap.Sessions {
 		s.Command = truncate(s.Command, bleCommandMax)
 		cur[s.SessionID] = s
 	}
-	d.last = cur
-	d.mu.Unlock()
 
 	// Sessions that vanished -> tell the Dial to drop them.
 	for id := range prev {
 		if _, ok := cur[id]; !ok {
-			d.write(protocol.Outbound{SessionID: id, State: protocol.StateClosed})
+			if d.write(protocol.Outbound{SessionID: id, State: protocol.StateClosed}) {
+				d.mu.Lock()
+				delete(d.last, id)
+				d.mu.Unlock()
+			}
 		}
 	}
-	// New or changed sessions -> push them.
+	// New or changed sessions -> push them; record only on success.
 	for _, s := range cur {
 		if p, ok := prev[s.SessionID]; !ok || p != s {
-			d.write(protocol.Outbound{
+			if d.write(protocol.Outbound{
 				SessionID: s.SessionID,
+				Project:   s.Project,
 				State:     s.State,
 				ToolName:  s.ToolName,
 				Command:   s.Command,
-			})
+			}) {
+				d.mu.Lock()
+				d.last[s.SessionID] = s
+				d.mu.Unlock()
+			}
 		}
 	}
 }
@@ -251,20 +291,29 @@ func (d *Device) sendTime() {
 	d.write(protocol.Outbound{Type: "set_time", Epoch: now.Unix(), TZOffset: offset})
 }
 
-func (d *Device) write(msg protocol.Outbound) {
+// write pushes one message to the Dial, returning whether it landed. The BLE TX
+// buffer fills under bursts ("timed out waiting for buffer space"); that error
+// is transient, so we retry briefly. This runs on the writer goroutine, never a
+// hook handler, so the short sleeps are harmless.
+func (d *Device) write(msg protocol.Outbound) bool {
 	d.mu.Lock()
 	rx, ok := d.rxChar, d.hasRX
 	d.mu.Unlock()
 	if !ok {
-		return
+		return false
 	}
 	payload, err := json.Marshal(msg)
 	if err != nil {
-		return
+		return false
 	}
-	if _, err := rx.WriteWithoutResponse(payload); err != nil {
-		d.logf("write: %v", err)
+	for attempt := 0; attempt < 6; attempt++ {
+		if _, err = rx.WriteWithoutResponse(payload); err == nil {
+			return true
+		}
+		d.logf("write (try %d): %v", attempt+1, err)
+		time.Sleep(40 * time.Millisecond)
 	}
+	return false
 }
 
 func (d *Device) setConnected(v bool) {
