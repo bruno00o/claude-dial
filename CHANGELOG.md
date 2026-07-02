@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/bruno00o/claude-dial/compare/v1.0.0...v1.0.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* install hooks as fail-silent curl commands instead of type:http ([25ef149](https://github.com/bruno00o/claude-dial/commit/25ef14952c10e3725fa3148935d4bbb233ed6156))
+
 ## [1.0.0](https://github.com/bruno00o/claude-dial/compare/v0.17.0...v1.0.0) (2026-07-02)
 
 
