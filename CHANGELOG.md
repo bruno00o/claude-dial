@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.4.0](https://github.com/bruno00o/claude-dial/compare/v0.3.0...v0.4.0) (2026-07-02)
+
+
+### Features
+
+* **daemon:** persist per-session "always allow" grants ([c8fe34d](https://github.com/bruno00o/claude-dial/commit/c8fe34d99961f956834abe56b73975bca0c0f06a))
+* **rules:** match Bash always-allow grants by command prefix ([b4e5cbe](https://github.com/bruno00o/claude-dial/commit/b4e5cbede5fb3f9de538cdee71f76c2b4f7d8d40))
+* **service:** keep the daemon alive with a launchd agent ([25c8d76](https://github.com/bruno00o/claude-dial/commit/25c8d76ce47c40818a2701de001d8628d600f798))
+
+
+### Bug Fixes
+
+* **ble:** use write-with-response to avoid macOS write-buffer wedge ([3c57ff2](https://github.com/bruno00o/claude-dial/commit/3c57ff2cbe7ff5297332db93b1da70479dba6642))
+* **firmware:** align permission timeout with daemon (120s -&gt; 90s) ([ef78fb9](https://github.com/bruno00o/claude-dial/commit/ef78fb91905933dfb46c8eab3b2944febed5e0a9))
+* **state:** raise blocked-idle timeout to 60s for the away case ([75c0c47](https://github.com/bruno00o/claude-dial/commit/75c0c4749952924404332e7e89f02921a0fbfc16))
+* **state:** show "needs you" for tools that request input, not "working" ([49418d9](https://github.com/bruno00o/claude-dial/commit/49418d9d45e68ec67fedc93289ab179bfb758e2b))
+
 ## [0.3.0](https://github.com/bruno00o/claude-dial/compare/v0.2.1...v0.3.0) (2026-07-02)
 
 
