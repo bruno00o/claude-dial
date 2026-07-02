@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.5.0](https://github.com/bruno00o/claude-dial/compare/v0.4.0...v0.5.0) (2026-07-02)
+
+
+### Features
+
+* **ota:** detect Dial firmware version and flag available updates ([e4c0398](https://github.com/bruno00o/claude-dial/commit/e4c03984477d2c722341a2b4c6cf9cde7349ab23))
+
 ## [0.4.0](https://github.com/bruno00o/claude-dial/compare/v0.3.0...v0.4.0) (2026-07-02)
 
 
