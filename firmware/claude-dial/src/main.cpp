@@ -31,6 +31,7 @@
 #include <NimBLEDevice.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include <Update.h>
 #include <time.h>
 #include <ctype.h>
 
@@ -41,6 +42,10 @@
 #define SVC_UUID  "12345678-1234-1234-1234-123456789ABC"
 #define RX_UUID   "12345678-1234-1234-1234-123456789ABD"
 #define TX_UUID   "12345678-1234-1234-1234-123456789ABE"
+// OTA firmware update: JSON control in, raw image bytes in, JSON status out.
+#define OTA_CTRL_UUID    "12345678-1234-1234-1234-123456789AC0"  // WRITE  (begin/end/abort)
+#define OTA_DATA_UUID    "12345678-1234-1234-1234-123456789AC1"  // WRITE  (raw chunks)
+#define OTA_STATUS_UUID  "12345678-1234-1234-1234-123456789AC2"  // NOTIFY (ready/progress/done/error)
 
 // ── Colour palette ── amber phosphor "terminal" theme (matches the simulator) ──
 // Physical object is orange/grey/black: amber-orange = active, grey = idle,
@@ -61,7 +66,7 @@
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK };
+enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA };
 
 struct Session {
   char  session_id[40];
@@ -87,6 +92,8 @@ static void removeSession(const char* sid);
 static int  activeSessions();
 static void sendDecision(const char* sid, const char* decision);
 static void sendHello();
+static void sendOtaStatus(const char* state, const char* msg, uint8_t pct);
+static void drawOtaProgress();
 
 // Firmware version, announced to the host on connect so the bridge can flag an
 // available OTA update. CI injects the exact release version via a generated
@@ -156,6 +163,16 @@ static bool buzzPending = false;
 
 // ── BLE / queue handles ──────────────────────────────────────────────────────
 static NimBLECharacteristic* txChar  = nullptr;
+
+// OTA state. The write callbacks feed Update directly (the host paces with
+// with-response writes, so no buffering is needed); loop() finalizes + reboots
+// off the BLE task. otaWritten/otaTotal drive the progress screen.
+static NimBLECharacteristic* otaStatusChar = nullptr;
+static volatile bool     otaActive   = false;
+static volatile bool     otaFinish   = false;   // ota_end received -> end()+reboot in loop()
+static volatile uint32_t otaTotal    = 0;
+static volatile uint32_t otaWritten  = 0;
+static AppState          otaPrevState = IDLE;    // where to return if the OTA aborts
 static bool                  bleConnected = false;
 static QueueHandle_t         rxQueue = nullptr;
 
@@ -374,11 +391,77 @@ static void sendHello() {
   JsonDocument doc;
   doc["type"] = "hello";
   doc["fw"]   = FW_VERSION;
+  doc["ota"]  = true;   // this firmware accepts BLE OTA updates
   char buf[64];
   size_t n = serializeJson(doc, buf, sizeof(buf));
   txChar->setValue((uint8_t*)buf, n);
   txChar->notify();
 }
+
+// Report OTA progress/result to the host. pct is only meaningful for "progress".
+static void sendOtaStatus(const char* state, const char* msg, uint8_t pct) {
+  if (!otaStatusChar) return;
+  JsonDocument doc;
+  doc["ota"] = state;
+  if (msg && msg[0])                 doc["msg"] = msg;
+  if (strcmp(state, "progress") == 0) doc["pct"] = pct;
+  char buf[96];
+  size_t n = serializeJson(doc, buf, sizeof(buf));
+  otaStatusChar->setValue((uint8_t*)buf, n);
+  otaStatusChar->notify();
+}
+
+// OTA control: begin (size) opens the inactive slot, end finalizes+reboots (done
+// in loop()), abort discards. Update writes to the *inactive* partition and only
+// switches the boot slot on a verified end(), so an interrupted transfer never
+// touches the running firmware — the Dial can't be bricked mid-update.
+class OtaCtrlCallback : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* pChar) override {
+    std::string val = pChar->getValue();
+    JsonDocument doc;
+    if (deserializeJson(doc, val.data(), val.size())) return;
+    const char* type = doc["type"] | "";
+    if (strcmp(type, "ota_begin") == 0) {
+      uint32_t size = doc["size"] | 0u;
+      if (size == 0 || !Update.begin(size)) {
+        sendOtaStatus("error", "begin failed", 0);
+        return;
+      }
+      otaTotal = size; otaWritten = 0; otaFinish = false; otaActive = true;
+      otaPrevState = (appState == OTA) ? IDLE : appState;
+      appState = OTA; needsRedraw = true;
+      sendOtaStatus("ready", "", 0);
+    } else if (strcmp(type, "ota_end") == 0) {
+      otaFinish = true;                 // finalize + reboot in loop()
+    } else if (strcmp(type, "ota_abort") == 0) {
+      if (otaActive) { Update.abort(); otaActive = false; appState = otaPrevState; needsRedraw = true; }
+      sendOtaStatus("aborted", "", 0);
+    }
+  }
+};
+
+// OTA data: raw image bytes, fed straight to Update. The host writes with
+// response, so returning from onWrite acks the chunk and paces the next one.
+class OtaDataCallback : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* pChar) override {
+    if (!otaActive) return;
+    std::string val = pChar->getValue();
+    if (Update.write((uint8_t*)val.data(), val.size()) != val.size()) {
+      Update.abort(); otaActive = false;
+      sendOtaStatus("error", "write failed", 0);
+      appState = otaPrevState; needsRedraw = true;
+      return;
+    }
+    otaWritten += val.size();
+    static uint8_t lastPct = 255;
+    uint8_t pct = otaTotal ? (uint8_t)((uint64_t)otaWritten * 100 / otaTotal) : 0;
+    if (pct != lastPct) {
+      lastPct = pct;
+      needsRedraw = true;
+      if (pct % 5 == 0) sendOtaStatus("progress", "", pct);
+    }
+  }
+};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Drawing
@@ -675,7 +758,38 @@ static void redraw() {
     case MODE_MENU:    drawModeMenu();    break;
     case BRIGHTNESS:   drawBrightness();  break;
     case CLOCK:        drawClock();       break;
+    case OTA:          drawOtaProgress(); break;
   }
+}
+
+// Full-screen "installing firmware" takeover: a filling arc + big percentage.
+static void drawOtaProgress() {
+  drawBase();
+  uint8_t pct = otaTotal ? (uint8_t)((uint64_t)otaWritten * 100 / otaTotal) : 0;
+
+  int arcR = 114, arcSteps = (int)((pct / 100.0f) * 180);
+  for (int i = 0; i < 180; i++) {
+    float a = (i / 180.0f) * 360.0f - 90.0f;
+    int ax = CX + (int)(arcR * cosf(a * DEG_TO_RAD));
+    int ay = CY + (int)(arcR * sinf(a * DEG_TO_RAD));
+    canvas.fillCircle(ax, ay, 1, (i < arcSteps) ? COL_AMBER : COL_ARC_OFF);
+  }
+
+  canvas.setTextDatum(middle_center);
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("updating firmware", CX, 92);
+
+  char pctStr[8]; snprintf(pctStr, sizeof(pctStr), "%u%%", pct);
+  canvas.setFont(&fonts::FreeMonoBold18pt7b);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.drawString(pctStr, CX, 128);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("keep the dial close", CX, 162);
+
+  canvas.pushSprite(0, 0);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -784,6 +898,7 @@ void setup() {
 
   NimBLEDevice::init("Claude-Dial");
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
+  NimBLEDevice::setMTU(517);   // 512-byte payloads keep OTA (~0.7 MB) to a few thousand writes
 
   NimBLEServer* pServer = NimBLEDevice::createServer();
   pServer->setCallbacks(new ServerCallbacks());
@@ -795,6 +910,15 @@ void setup() {
   rxChar->setCallbacks(new RxCallback());
 
   txChar = pService->createCharacteristic(TX_UUID, NIMBLE_PROPERTY::NOTIFY);
+
+  // OTA characteristics on the same service.
+  NimBLECharacteristic* otaCtrl = pService->createCharacteristic(
+      OTA_CTRL_UUID, NIMBLE_PROPERTY::WRITE);
+  otaCtrl->setCallbacks(new OtaCtrlCallback());
+  NimBLECharacteristic* otaData = pService->createCharacteristic(
+      OTA_DATA_UUID, NIMBLE_PROPERTY::WRITE);
+  otaData->setCallbacks(new OtaDataCallback());
+  otaStatusChar = pService->createCharacteristic(OTA_STATUS_UUID, NIMBLE_PROPERTY::NOTIFY);
 
   pService->start();
 
@@ -830,12 +954,29 @@ void loop() {
     handleRxMessage(msg.data, msg.len);
   }
 
+  // Finalize an OTA off the BLE task: verify the image, switch the boot slot,
+  // and reboot into the new firmware. A failed verify leaves the running slot
+  // untouched (Update never committed it).
+  if (otaFinish) {
+    otaFinish = false;
+    if (Update.end(true)) {
+      sendOtaStatus("done", "", 100);
+      delay(400);
+      ESP.restart();
+    } else {
+      otaActive = false;
+      sendOtaStatus("error", "verify failed", 0);
+      appState = otaPrevState; needsRedraw = true;
+    }
+  }
+
   // If the host link drops, the session view is no longer trustworthy: the
   // daemon can't tell us a session went idle while we're disconnected, so a
   // frozen "working" roster (spinner still turning) would lie. Drop it and fall
   // back to the clock; a reconnect resyncs the full state within a sweep tick.
   static bool wasConnected = false;
   if (wasConnected && !bleConnected) {
+    if (otaActive) { Update.abort(); otaActive = false; }  // link died mid-update: discard
     memset(sessions, 0, sizeof(sessions));
     sessionCount   = 0;
     permQueueCount = 0;
