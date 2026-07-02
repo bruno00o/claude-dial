@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/bruno00o/claude-dial/compare/v0.15.0...v0.16.0) (2026-07-02)
+
+
+### Features
+
+* **ui:** factory reset from the Settings menu ([a1365f5](https://github.com/bruno00o/claude-dial/commit/a1365f5d5286a513a45efb4fb5baa198ae4cdc5e))
+
 ## [0.15.0](https://github.com/bruno00o/claude-dial/compare/v0.14.0...v0.15.0) (2026-07-02)
 
 
