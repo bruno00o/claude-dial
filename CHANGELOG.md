@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/bruno00o/claude-dial/compare/v0.10.0...v0.11.0) (2026-07-02)
+
+
+### Features
+
+* **ui:** read long commands in full + flag risky ones on the permission screen ([680984c](https://github.com/bruno00o/claude-dial/commit/680984c2649c34199dd95971d7fad5d7017806c7))
+
 ## [0.10.0](https://github.com/bruno00o/claude-dial/compare/v0.9.0...v0.10.0) (2026-07-02)
 
 
