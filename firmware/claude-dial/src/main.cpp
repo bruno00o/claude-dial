@@ -162,6 +162,10 @@ static int   menuChoice = 0;
 static long  lastEncoderPos = 0;
 static int   listScrollOffset = 0;
 
+// Name of the bridge machine we're connected to (from set_time), shown on idle
+// so you can see which computer the Dial is driving. Cleared on disconnect.
+static char  hostName[24] = "";
+
 // Display brightness (0-255), adjustable from the menu, persisted in NVS.
 static uint8_t   brightness = 180;
 static Preferences prefs;
@@ -372,6 +376,7 @@ static void handleRxMessage(const char* data, uint16_t len) {
   // Control: set the RTC clock from the host
   const char* type = doc["type"] | "";
   if (strcmp(type, "set_time") == 0) {
+    strlcpy(hostName, doc["host"] | "", sizeof(hostName));
     long long epoch = doc["epoch"]     | 0LL;
     long      tzoff = doc["tz_offset"] | 0;
     if (epoch > 0) {
@@ -596,6 +601,11 @@ static void drawIdle() {
   canvas.drawString(status, CX, CY + 30);
 
   canvas.fillCircle(CX, CY + 56, 3, bleConnected ? COL_AMBER : COL_RING);
+  if (bleConnected && hostName[0]) {           // which machine we're driving
+    canvas.setFont(&fonts::FreeMono9pt7b);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString(hostName, CX, CY + 74);
+  }
   canvas.pushSprite(0, 0);
 }
 
@@ -1375,6 +1385,7 @@ void loop() {
     sessionCount   = 0;
     permQueueCount = 0;
     currentPermSid[0] = 0;
+    hostName[0]    = 0;
     if (appState != MODE_MENU && appState != BRIGHTNESS && appState != SOUND && appState != CLOCK)
       appState = homeView();   // sessions cleared → clock, unless a settings screen is up
     needsRedraw = true;

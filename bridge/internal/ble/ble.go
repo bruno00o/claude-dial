@@ -15,6 +15,8 @@ import (
 	"errors"
 	"log"
 	"maps"
+	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -507,7 +509,21 @@ func (d *Device) Decisions() <-chan protocol.Decision {
 func (d *Device) sendTime() {
 	now := time.Now()
 	_, offset := now.Zone()
-	d.write(protocol.Outbound{Type: "set_time", Epoch: now.Unix(), TZOffset: offset})
+	d.write(protocol.Outbound{Type: "set_time", Epoch: now.Unix(), TZOffset: offset, Host: hostName()})
+}
+
+// hostName is the bridge machine's short name, shown on the Dial so you can see
+// which computer it's driving. The bare hostname (minus any ".local"/domain) —
+// no shelling out to scutil, keeping the single-binary story intact.
+func hostName() string {
+	h, err := os.Hostname()
+	if err != nil || h == "" {
+		return ""
+	}
+	if i := strings.IndexByte(h, '.'); i > 0 {
+		h = h[:i]
+	}
+	return h
 }
 
 // displayEqual reports whether two views render identically on the Dial. The
