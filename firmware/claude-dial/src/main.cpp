@@ -66,7 +66,7 @@
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO };
+enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND };
 
 struct Session {
   char  session_id[40];
@@ -128,6 +128,7 @@ static void drawPermission();
 static void drawConfirming();
 static void drawModeMenu();
 static void drawBrightness();
+static void drawSound();
 static void drawClock();
 static void redraw();
 static void handleEncoder(int delta);
@@ -164,6 +165,34 @@ static int   listScrollOffset = 0;
 // Display brightness (0-255), adjustable from the menu, persisted in NVS.
 static uint8_t   brightness = 180;
 static Preferences prefs;
+
+// Speaker volume (0-255, 0 = muted), adjustable from the menu, persisted in NVS.
+static uint8_t   soundVol = 128;
+
+// One recognizable sound per event, all routed through playEarcon so volume/mute
+// applies uniformly and the palette stays consistent. Sequenced with short
+// delays (loop context) — each stays under ~300ms so the UI never visibly stalls.
+enum Earcon {
+  SND_BOOT, SND_NEEDS_YOU, SND_TICK, SND_ALLOW, SND_REJECT,
+  SND_UNDO, SND_DONE, SND_OTA_DONE, SND_ERROR,
+};
+
+static void playEarcon(Earcon e) {
+  if (soundVol == 0) return;                 // muted → stay silent (and skip the delays)
+  auto& spk = M5Dial.Speaker;
+  switch (e) {
+    case SND_BOOT:      spk.tone(880, 80);  delay(95);  spk.tone(1320, 90);  break;
+    case SND_NEEDS_YOU: spk.tone(1047, 110); delay(120); spk.tone(1568, 140); break;  // rising "ding-dong up"
+    case SND_TICK:      spk.tone(1500, 25);                                    break;  // soft "registered"
+    case SND_ALLOW:     spk.tone(1568, 60);  delay(70);  spk.tone(2093, 90);  break;  // bright up  G6→C7
+    case SND_REJECT:    spk.tone(784, 70);   delay(80);  spk.tone(523, 110);  break;  // low down   G5→C5
+    case SND_UNDO:      spk.tone(784, 40);   delay(55);  spk.tone(587, 55);   break;  // short descend
+    case SND_DONE:      spk.tone(1047, 70); delay(80); spk.tone(1319, 70); delay(80); spk.tone(1568, 130); break;  // C-E-G "all done"
+    case SND_OTA_DONE:  spk.tone(1047, 60); delay(70); spk.tone(1319, 60); delay(70);
+                        spk.tone(1568, 60); delay(70); spk.tone(2093, 140); break;    // C-E-G-C jingle
+    case SND_ERROR:     spk.tone(400, 90);   delay(100); spk.tone(300, 130);  break;  // soft low blip
+  }
+}
 
 // Decision grace window: a picked choice is NOT sent immediately. It waits
 // CONFIRM_MS on the CONFIRMING screen, where a tap/press undoes it; only when
@@ -834,15 +863,15 @@ static void drawConfirming() {
   canvas.pushSprite(0, 0);
 }
 
-static const char* menuLabels[] = { "monitor", "brightness", "clock", "firmware" };
-static const int MENU_N = 4;
+static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "firmware" };
+static const int MENU_N = 5;
 
 static void drawModeMenu() {
   drawBase();
   canvas.setTextDatum(middle_center);
   canvas.setFont(&fonts::FreeMono9pt7b);
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("settings", CX, 60);
+  canvas.drawString("settings", CX, 34);
 
   for (int i = 0; i < MENU_N; i++) {
     bool sel = (i == menuChoice);
@@ -872,6 +901,33 @@ static void drawBrightness() {
   int bw = 150, bh = 8, bx = CX - bw / 2, by = 158;
   canvas.drawRoundRect(bx, by, bw, bh, 4, COL_RING);
   canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * brightness / 255, bh - 2, 3, COL_AMBER);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("turn / press", CX, 196);
+  canvas.pushSprite(0, 0);
+}
+
+static void drawSound() {
+  drawBase();
+  canvas.setTextDatum(middle_center);
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("sound", CX, 74);
+
+  canvas.setFont(&fonts::FreeMonoBold18pt7b);
+  if (soundVol == 0) {
+    canvas.setTextColor(COL_GRAY, COL_BG);
+    canvas.drawString("muted", CX, CY);
+  } else {
+    char pct[8]; snprintf(pct, sizeof(pct), "%d%%", (soundVol * 100) / 255);
+    canvas.setTextColor(COL_AMBER, COL_BG);
+    canvas.drawString(pct, CX, CY);
+  }
+
+  int bw = 150, bh = 8, bx = CX - bw / 2, by = 158;
+  canvas.drawRoundRect(bx, by, bw, bh, 4, COL_RING);
+  if (soundVol) canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * soundVol / 255, bh - 2, 3, COL_AMBER);
 
   canvas.setFont(&fonts::FreeMono9pt7b);
   canvas.setTextColor(COL_DIM, COL_BG);
@@ -912,6 +968,7 @@ static void redraw() {
     case CONFIRMING:   drawConfirming();  break;
     case MODE_MENU:    drawModeMenu();    break;
     case BRIGHTNESS:   drawBrightness();  break;
+    case SOUND:        drawSound();       break;
     case CLOCK:        drawClock();       break;
     case OTA:          drawOtaProgress(); break;
     case OTA_PROMPT:   drawOtaPrompt();   break;
@@ -1050,6 +1107,16 @@ static void handleEncoder(int delta) {
       needsRedraw = true;
       break;
     }
+    case SOUND: {
+      int v = (int)soundVol + (delta > 0 ? 16 : -16);
+      if (v < 0)   v = 0;                     // 0 = muted
+      if (v > 255) v = 255;
+      soundVol = (uint8_t)v;
+      M5Dial.Speaker.setVolume(soundVol);
+      playEarcon(SND_TICK);                   // hear the new level (silent if muted)
+      needsRedraw = true;
+      break;
+    }
     default: break;
   }
 }
@@ -1070,7 +1137,7 @@ static void handlePress() {
       // Don't send yet — open the grace window. currentPermSid stays set so we
       // can either commit or undo. commitDecision() (loop) sends when it elapses.
       confirmChoice = permChoice;
-      M5Dial.Speaker.tone(1500, 30);        // soft "registered" tick
+      playEarcon(SND_TICK);
       appState     = CONFIRMING;
       confirmStart = millis();
       needsRedraw  = true;
@@ -1078,7 +1145,7 @@ static void handlePress() {
     }
 
     case CONFIRMING:                         // undo — nothing was sent, back to the choice
-      M5Dial.Speaker.tone(700, 40); delay(55); M5Dial.Speaker.tone(500, 40);
+      playEarcon(SND_UNDO);
       permChoice  = confirmChoice;           // keep the selection they had
       appState    = PERMISSION;
       needsRedraw = true;
@@ -1088,7 +1155,7 @@ static void handlePress() {
       if (otaStarting) break;
       if (otaPromptChoice == 0) {           // install now → ask the host to begin
         sendOtaConfirm();
-        M5Dial.Speaker.tone(1600, 80);
+        playEarcon(SND_TICK);
         otaStarting = true;
         otaPromptStartedAt = millis();
       } else {                              // later → dismiss, but keep the offer
@@ -1101,8 +1168,9 @@ static void handlePress() {
       switch (menuChoice) {
         case 0: appState = homeView();    break;   // monitor — back to the main view
         case 1: appState = BRIGHTNESS;    break;
-        case 2: appState = CLOCK;         break;
-        case 3: appState = FIRMWARE_INFO; break;
+        case 2: appState = SOUND;         break;
+        case 3: appState = CLOCK;         break;
+        case 4: appState = FIRMWARE_INFO; break;
       }
       needsRedraw = true;
       break;
@@ -1112,7 +1180,7 @@ static void handlePress() {
         otaPromptChoice = 0; otaStarting = false;
         appState = OTA_PROMPT;
       } else {
-        appState = MODE_MENU; menuChoice = 3;
+        appState = MODE_MENU; menuChoice = 4;
       }
       needsRedraw = true;
       break;
@@ -1121,6 +1189,13 @@ static void handlePress() {
       prefs.putUChar("bright", brightness);
       appState    = MODE_MENU;
       menuChoice  = 1;
+      needsRedraw = true;
+      break;
+
+    case SOUND:                                    // confirm — persist and back to menu
+      prefs.putUChar("vol", soundVol);
+      appState    = MODE_MENU;
+      menuChoice  = 2;
       needsRedraw = true;
       break;
   }
@@ -1148,7 +1223,7 @@ static void handleTouch(int x, int y) {
       break;
 
     case MODE_MENU: {
-      if (y < 60) break;                               // title zone
+      if (y < 45) break;                               // title zone
       int base = CY - (MENU_N - 1) * 15;               // first entry's y
       int c = (y - base + 15) / 30;                    // 30px rows, nearest
       if (c < 0) c = 0;
@@ -1186,7 +1261,7 @@ static void commitDecision() {
     sendDecision(currentPermSid, dec);
     strlcpy(sessions[idx].state, (confirmChoice == 2) ? "idle" : "working",
             sizeof(sessions[idx].state));
-    M5Dial.Speaker.tone(2000, 60); delay(80); M5Dial.Speaker.tone(2400, 60);
+    playEarcon(confirmChoice == 2 ? SND_REJECT : SND_ALLOW);
   }
   permShowNext();
 }
@@ -1204,6 +1279,8 @@ void setup() {
   prefs.begin("cdial", false);
   brightness = prefs.getUChar("bright", 180);
   M5Dial.Display.setBrightness(brightness);
+  soundVol = prefs.getUChar("vol", 128);
+  M5Dial.Speaker.setVolume(soundVol);
 
   canvas.setColorDepth(16);          // RGB565 — set depth before allocating
   canvas.createSprite(240, 240);
@@ -1245,7 +1322,7 @@ void setup() {
   pAdv->setMinPreferred(0x06);
   NimBLEDevice::startAdvertising();
 
-  M5Dial.Speaker.tone(880, 80); delay(100); M5Dial.Speaker.tone(1320, 80);
+  playEarcon(SND_BOOT);
 
   lastEncoderPos = M5Dial.Encoder.read();
   needsRedraw    = true;
@@ -1257,12 +1334,10 @@ void setup() {
 void loop() {
   M5Dial.update();
 
-  // Deferred buzz (set from handleRxMessage, played here outside the BLE task)
+  // Deferred "needs you" earcon (set from handleRxMessage, played off the BLE task)
   if (buzzPending) {
     buzzPending = false;
-    M5Dial.Speaker.tone(1200, 150);
-    delay(180);
-    M5Dial.Speaker.tone(1600, 80);
+    playEarcon(SND_NEEDS_YOU);
   }
 
   // Drain inbound BLE messages — this is the only place state mutates
@@ -1278,11 +1353,13 @@ void loop() {
     otaFinish = false;
     if (Update.end(true)) {
       sendOtaStatus("done", "", 100);
+      playEarcon(SND_OTA_DONE);
       delay(400);
       ESP.restart();
     } else {
       otaActive = false;
       sendOtaStatus("error", "verify failed", 0);
+      playEarcon(SND_ERROR);
       appState = otaPrevState; needsRedraw = true;
     }
   }
@@ -1298,11 +1375,26 @@ void loop() {
     sessionCount   = 0;
     permQueueCount = 0;
     currentPermSid[0] = 0;
-    if (appState != MODE_MENU && appState != BRIGHTNESS && appState != CLOCK)
+    if (appState != MODE_MENU && appState != BRIGHTNESS && appState != SOUND && appState != CLOCK)
       appState = homeView();   // sessions cleared → clock, unless a settings screen is up
     needsRedraw = true;
   }
   wasConnected = bleConnected;
+
+  // "All done" chime: when the last busy session goes quiet, a gentle cue tells
+  // you it's your turn without looking. Only on the busy→idle edge, and only
+  // while connected (a disconnect clears sessions but musn't ring — busyPrev
+  // resets to false so reconnecting doesn't ring either).
+  static bool busyPrev = false;
+  bool anyBusy = false;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (!sessions[i].active) continue;
+    const char* st = sessions[i].state;
+    if (strcmp(st, "working") == 0 || strcmp(st, "blocked") == 0 ||
+        strcmp(st, "permission_request") == 0) { anyBusy = true; break; }
+  }
+  if (bleConnected && busyPrev && !anyBusy) playEarcon(SND_DONE);
+  busyPrev = anyBusy;
 
   // Encoder: accumulate counts, step once per detent
   static long encAccum = 0;
@@ -1321,7 +1413,7 @@ void loop() {
     handlePress();
   }
   if (M5Dial.BtnA.wasHold()) {
-    if (appState != MODE_MENU && appState != BRIGHTNESS) {
+    if (appState != MODE_MENU && appState != BRIGHTNESS && appState != SOUND) {
       appState    = MODE_MENU;
       menuChoice  = 0;
       needsRedraw = true;
