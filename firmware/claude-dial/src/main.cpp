@@ -132,6 +132,7 @@ static void drawClock();
 static void redraw();
 static void handleEncoder(int delta);
 static void handlePress();
+static void handleTouch(int x, int y);
 
 // ── App state (all mutated only from loop() context) ─────────────────────────
 static AppState appState = IDLE;
@@ -1026,6 +1027,49 @@ static void handlePress() {
   }
 }
 
+// Touch: tap a choice directly instead of turn-then-click. Maps the tap's Y to
+// the on-screen row, sets the same selection the encoder would, then reuses
+// handlePress() so touch and encoder+button share one code path. Only the
+// decision/selection screens react; monitor screens ignore taps so a stray
+// touch can never approve or reject anything.
+static void handleTouch(int x, int y) {
+  (void)x;   // vertical lists: Y alone picks the row (X reserved for future swipes)
+  switch (appState) {
+    case PERMISSION:
+      if (y < 138) break;                              // taps on the command area do nothing
+      permChoice = (y < 164) ? 0 : (y < 190) ? 1 : 2;  // rows at 150 / 176 / 202
+      needsRedraw = true;
+      handlePress();
+      break;
+
+    case MODE_MENU: {
+      if (y < 60) break;                               // title zone
+      int base = CY - (MENU_N - 1) * 15;               // first entry's y
+      int c = (y - base + 15) / 30;                    // 30px rows, nearest
+      if (c < 0) c = 0;
+      if (c >= MENU_N) c = MENU_N - 1;
+      menuChoice = c;
+      needsRedraw = true;
+      handlePress();
+      break;
+    }
+
+    case OTA_PROMPT:
+      if (otaStarting || y < 118) break;               // options at 130 / 156
+      otaPromptChoice = (y < 143) ? 0 : 1;
+      needsRedraw = true;
+      handlePress();
+      break;
+
+    case FIRMWARE_INFO:
+    case CONFIRMING:
+      handlePress();                                   // tap anywhere = the button action
+      break;
+
+    default: break;                                    // idle / clock / roster: ignore taps
+  }
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // setup()
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1162,6 +1206,10 @@ void loop() {
       needsRedraw = true;
     }
   }
+
+  // Touch: a tap (finger lifted) selects and fires the choice under it.
+  auto tp = M5Dial.Touch.getDetail();
+  if (tp.wasClicked()) handleTouch(tp.x, tp.y);
 
   // Confirming auto-dismiss -> show next pending (or fall back)
   if (appState == CONFIRMING && (millis() - confirmStart) > 1500) {
