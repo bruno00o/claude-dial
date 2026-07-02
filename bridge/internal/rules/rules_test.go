@@ -26,6 +26,48 @@ func TestAllowAndMatch(t *testing.T) {
 	}
 }
 
+func TestBashPrefixMatch(t *testing.T) {
+	s := Load("")
+	s.Allow("s1", "Bash", "npm test")
+
+	allowed := []string{
+		"npm test",                 // exact
+		"npm test --coverage",      // trailing flag
+		"npm test src/foo.test.js", // trailing arg
+	}
+	for _, c := range allowed {
+		if !s.Allowed("s1", "Bash", c) {
+			t.Errorf("%q should match prefix 'npm test'", c)
+		}
+	}
+
+	denied := []string{
+		"npm testfoo",   // not a word boundary
+		"npm publish",   // different subcommand
+		"npm",           // shorter than the prefix
+		"NPM test",      // case-sensitive
+		"npmtest",       // no boundary at all
+	}
+	for _, c := range denied {
+		if s.Allowed("s1", "Bash", c) {
+			t.Errorf("%q must NOT match prefix 'npm test'", c)
+		}
+	}
+}
+
+func TestBashPrefixIsPerSessionAndTool(t *testing.T) {
+	s := Load("")
+	s.Allow("s1", "Bash", "git status")
+	if s.Allowed("s2", "Bash", "git status --short") {
+		t.Fatal("prefix match must not cross sessions")
+	}
+	// A non-Bash tool with the same text still matches only exactly.
+	s.Allow("s1", "Read", "/etc/hosts")
+	if s.Allowed("s1", "Read", "/etc/hosts.bak") {
+		t.Fatal("non-Bash tools must not prefix-match")
+	}
+}
+
 func TestForget(t *testing.T) {
 	s := Load("")
 	s.Allow("s1", "Bash", "ls")

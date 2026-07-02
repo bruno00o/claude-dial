@@ -13,8 +13,14 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
+
+// toolBash names the one tool whose grants match by command prefix rather than
+// exactly (see Allowed). Everything else (Read, Edit, WebFetch, …) carries a
+// path/URL where a prefix match would be meaningless or unsafe.
+const toolBash = "Bash"
 
 // grant is one always-allow entry, matched exactly.
 type grant struct {
@@ -51,11 +57,38 @@ func Load(path string) *Store {
 	return s
 }
 
-// Allowed reports whether this session already always-allowed this exact call.
+// Allowed reports whether this session already always-allowed this call. For
+// Bash, a grant matches by command prefix on word boundaries — always-allowing
+// "npm test" covers "npm test" and "npm test --coverage" but not "npm testfoo"
+// or "npm publish" — so trailing args don't force a re-prompt, mirroring Claude
+// Code's own Bash(npm test:*) rule. Other tools match the command exactly.
 func (s *Store) Allowed(session, tool, command string) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.set[grant{session, tool, command}]
+	if tool != toolBash {
+		return s.set[grant{session, tool, command}]
+	}
+	cand := strings.Fields(command)
+	for g := range s.set {
+		if g.Session == session && g.Tool == toolBash && tokenPrefix(strings.Fields(g.Command), cand) {
+			return true
+		}
+	}
+	return false
+}
+
+// tokenPrefix reports whether cand starts with every token of prefix. An empty
+// prefix never matches (it would allow everything).
+func tokenPrefix(prefix, cand []string) bool {
+	if len(prefix) == 0 || len(cand) < len(prefix) {
+		return false
+	}
+	for i, tok := range prefix {
+		if cand[i] != tok {
+			return false
+		}
+	}
+	return true
 }
 
 // Allow records an always-allow grant and persists the store.
