@@ -289,9 +289,11 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 			}
 		}
 	}
-	// New or changed sessions -> push them; record only on success.
+	// New or changed sessions -> push them; record only on success. Only writes
+	// when what the Dial *shows* changes (see displayEqual), so per-tool-call
+	// command churn across busy sessions doesn't flood the slow BLE link.
 	for _, s := range cur {
-		if p, exists := prev[s.SessionID]; !exists || p != s {
+		if p, exists := prev[s.SessionID]; !exists || !displayEqual(p, s) {
 			if d.write(protocol.Outbound{
 				SessionID: s.SessionID,
 				Project:   s.Project,
@@ -327,6 +329,20 @@ func (d *Device) sendTime() {
 	now := time.Now()
 	_, offset := now.Zone()
 	d.write(protocol.Outbound{Type: "set_time", Epoch: now.Unix(), TZOffset: offset})
+}
+
+// displayEqual reports whether two views render identically on the Dial. The
+// roster shows only project + state; a tool/command is shown only in a permission
+// takeover. So a "working" session whose command changes on every tool call looks
+// no different on screen — and must not cost a (slow, congestion-prone) BLE write.
+func displayEqual(a, b protocol.SessionView) bool {
+	if a.Project != b.Project || a.State != b.State {
+		return false
+	}
+	if a.State == protocol.StatePermission {
+		return a.ToolName == b.ToolName && a.Command == b.Command
+	}
+	return true
 }
 
 // write pushes one message to the Dial, returning whether it landed. One attempt
