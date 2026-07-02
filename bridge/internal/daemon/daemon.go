@@ -42,10 +42,14 @@ type Config struct {
 	// no hooks either, so keep this comfortably above a normal turn.
 	IdleAfter time.Duration
 	// BlockedIdleAfter demotes a "blocked" session to "idle" after this much
-	// silence. A denied permission ("no") fires no clearing hook, so blocked
-	// must self-heal; keep it above the time a human takes to answer a permission
-	// or question, so the "needs you" cue stays visible while it's genuinely
-	// pending (an allowed one clears sooner via PostToolUse).
+	// silence. A terminal-denied permission fires no clearing hook (confirmed:
+	// Claude Code has no heartbeat while a permission pends, and no hook on a
+	// terminal deny), so blocked can't be cleared positively and must self-heal
+	// on a timer. This timer is only the *last resort*: an allowed permission
+	// clears via PostToolUse, a deny-then-reply via MessageDisplay, and a
+	// deny-then-new-prompt via UserPromptSubmit — all well before it fires. So it
+	// really only governs the "you walked away, a permission is genuinely pending"
+	// case, where a longer window keeps the "needs you" cue lit until you return.
 	BlockedIdleAfter time.Duration
 	// ForgetAfter drops a session entirely after this much silence (terminal
 	// closed without a SessionEnd, machine slept, …).
@@ -63,7 +67,7 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 		cfg.IdleAfter = 90 * time.Second
 	}
 	if cfg.BlockedIdleAfter <= 0 {
-		cfg.BlockedIdleAfter = 25 * time.Second
+		cfg.BlockedIdleAfter = 60 * time.Second
 	}
 	if cfg.ForgetAfter <= 0 {
 		cfg.ForgetAfter = time.Hour
