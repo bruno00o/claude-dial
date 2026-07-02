@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.0](https://github.com/bruno00o/claude-dial/compare/v0.6.0...v0.7.0) (2026-07-02)
+
+
+### Features
+
+* **ota:** show the target version while flashing + a firmware screen ([2bcdf31](https://github.com/bruno00o/claude-dial/commit/2bcdf31335d314cfe5bdaabd2ea06f13b4e6ea8a))
+
 ## [0.6.0](https://github.com/bruno00o/claude-dial/compare/v0.5.0...v0.6.0) (2026-07-02)
 
 
