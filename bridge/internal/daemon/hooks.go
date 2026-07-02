@@ -92,9 +92,16 @@ func (d *Daemon) handleEvent(w http.ResponseWriter, in hookInput) {
 	case "MessageDisplay":
 		// Weak liveness: must not un-block a session waiting on a permission.
 		d.store.TouchLiveness(in.SessionID, project)
-	case "PreToolUse": // monitor-mode notifier: a tool is starting right now
-		d.store.Upsert(in.SessionID, project, protocol.StateWorking,
-			in.ToolName, extractCommand(in.ToolInput))
+	case "PreToolUse":
+		// Monitor-mode notifier: a tool is about to run. This fires *before* any
+		// PermissionRequest for the same call (not "after yes" — the post-yes
+		// clear is PostToolUse), and the two hooks land in separate goroutines
+		// that race. So this must be weak liveness that can't clobber a fresh
+		// permission cue: a tool that also asks (AskUserQuestion fires both
+		// PreToolUse and PermissionRequest at once) must land on "needs you",
+		// not "working". Auto-approved tools have no PermissionRequest, so they
+		// still assert working normally.
+		d.store.TouchLiveness(in.SessionID, project)
 	case "PermissionRequest": // the permission dialog just appeared
 		d.store.Upsert(in.SessionID, project, protocol.StateBlocked,
 			in.ToolName, extractCommand(in.ToolInput))

@@ -73,13 +73,16 @@ func (s *Store) Touch(id, project, state string) {
 // permission was answered and work resumed, so it should clear to working.
 const blockedRenderGrace = 3 * time.Second
 
-// TouchLiveness refreshes a session from a weak liveness signal (an assistant
-// message rendering). It asserts "working" for idle/working/new sessions, and
+// TouchLiveness refreshes a session from a weak liveness signal — an assistant
+// message rendering (MessageDisplay), or a tool about to run (the monitor-mode
+// PreToolUse notifier). It asserts "working" for idle/working/new sessions, and
 // for a waiting session only once past blockedRenderGrace — so the "needs you"
-// cue isn't clobbered the instant it appears, yet a genuinely resumed session
-// (you answered, Claude is replying again) doesn't stay stuck on "waiting". It
-// never refreshes a still-fresh waiting session's timestamp, so its decay window
-// stays anchored to when the request appeared.
+// cue isn't clobbered the instant it appears, whether by a coincident render or
+// by the PreToolUse that races the PermissionRequest for the same tool call
+// (AskUserQuestion fires both at once), yet a genuinely resumed session (you
+// answered, Claude is working again) doesn't stay stuck on "waiting". It never
+// refreshes a still-fresh waiting session's timestamp, so its decay window stays
+// anchored to when the request appeared.
 func (s *Store) TouchLiveness(id, project string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
