@@ -82,6 +82,7 @@ func cmdServe(args []string) {
 	timeout := fs.Duration("timeout", 90*time.Second, "how long to wait for the dial before falling back to the terminal")
 	idleAfter := fs.Duration("idle-after", 90*time.Second, "demote a silent working session to idle after this long")
 	useBLE := fs.Bool("ble", false, "also drive a physical M5Stack Dial over BLE")
+	usageBudget := fs.Int64("usage-budget", 0, "token budget for the 5h usage gauge (0 = auto-calibrate to your heaviest recent 5h)")
 	debug := fs.Bool("debug", false, "log every hook event received")
 	_ = fs.Parse(args)
 
@@ -103,7 +104,7 @@ func cmdServe(args []string) {
 		}
 	}
 
-	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), BridgeVersion: version, Debug: *debug})
+	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), BridgeVersion: version, UsageBudgetTokens: *usageBudget, Debug: *debug})
 
 	mux := http.NewServeMux()
 	hub.RegisterRoutes(mux)

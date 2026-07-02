@@ -170,6 +170,9 @@ static char  hostName[24] = "";
 // This Dial's own BLE address, set once at boot — a stable id shown on the
 // connection screen to tell multiple Dials apart.
 static char  dialId[20] = "";
+// How full the 5h usage window is (0..100), pushed by the bridge — fills the
+// rim gauge. Cleared on disconnect.
+static int   usagePct = 0;
 
 // Display brightness (0-255), adjustable from the menu, persisted in NVS.
 static uint8_t   brightness = 180;
@@ -420,6 +423,15 @@ static void handleRxMessage(const char* data, uint16_t len) {
     return;
   }
 
+  // Control: the 5h usage gauge (0..100), for the rim ring.
+  if (strcmp(type, "usage") == 0) {
+    usagePct = doc["pct"] | 0;
+    if (usagePct < 0) usagePct = 0;
+    if (usagePct > 100) usagePct = 100;
+    needsRedraw = true;
+    return;
+  }
+
   // Control: the host has a newer firmware and offers a tactile install.
   if (strcmp(type, "ota_available") == 0) {
     const char* v = doc["version"] | "";
@@ -614,6 +626,13 @@ static void drawDotRing(float frac, uint32_t on, uint32_t off, int count, int ra
   }
 }
 
+// Gauge colour by how close the 5h window is to the cap: amber → hot → red.
+static uint32_t usageColor() {
+  if (usagePct >= 85) return COL_RED;
+  if (usagePct >= 70) return COL_AMBER_HOT;
+  return COL_AMBER;
+}
+
 static void getTimeStr(char* tBuf, char* dBuf) {
   auto dt = M5Dial.Rtc.getDateTime();
   snprintf(tBuf, 12, "%02d:%02d", dt.time.hours, dt.time.minutes);
@@ -622,7 +641,8 @@ static void getTimeStr(char* tBuf, char* dBuf) {
 
 static void drawIdle() {
   drawBase();
-  drawDotRing(0.0f, COL_AMBER, COL_ARC_OFF, 60, CR - 8);   // ambient dial bezel
+  // Rim gauge: fills with the 5h usage window (all-dim ambient bezel at 0%).
+  drawDotRing(usagePct / 100.0f, usageColor(), COL_ARC_OFF, 60, CR - 8);
   char tBuf[12], dBuf[20];
   getTimeStr(tBuf, dBuf);
 
@@ -671,6 +691,7 @@ static int sessionRank(const Session& s) {
 
 static void drawSessionList() {
   drawBase();
+  drawDotRing(usagePct / 100.0f, usageColor(), COL_ARC_OFF, 60, CR - 8);   // usage gauge on the rim
 
   int active[MAX_SESSIONS], n = 0, waits = 0;
   for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -1500,6 +1521,7 @@ void loop() {
     permQueueCount = 0;
     currentPermSid[0] = 0;
     hostName[0]    = 0;
+    usagePct       = 0;
     if (appState != MODE_MENU && appState != BRIGHTNESS && appState != SOUND &&
         appState != CONNECTION && appState != CLOCK)
       appState = homeView();   // sessions cleared → clock, unless a settings screen is up

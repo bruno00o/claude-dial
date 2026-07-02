@@ -13,6 +13,7 @@ import (
 	"github.com/bruno00o/claude-dial/bridge/internal/protocol"
 	"github.com/bruno00o/claude-dial/bridge/internal/rules"
 	"github.com/bruno00o/claude-dial/bridge/internal/session"
+	"github.com/bruno00o/claude-dial/bridge/internal/usage"
 )
 
 // Device is anything that can render the sessions and answer permission
@@ -51,6 +52,7 @@ type Daemon struct {
 	router  *router
 	rules   *rules.Store
 	fw      *firmware.Checker
+	usage   *usage.Reader
 	otaBusy atomic.Bool // guards against concurrent firmware flashes
 
 	// bridgeVersion is this binary's own version. The bridge drives the OTA, so
@@ -91,6 +93,11 @@ type Config struct {
 	// BridgeVersion is this binary's version, used to gate firmware OTA so the
 	// bridge never flashes an image newer than itself. Empty disables the gate.
 	BridgeVersion string
+	// UsageBudgetTokens is the denominator for the 5h usage gauge. 0 self-calibrates
+	// to the heaviest 5h in the last week. UsageDir overrides the transcript dir
+	// (empty → ~/.claude/projects).
+	UsageBudgetTokens int64
+	UsageDir          string
 	// Debug logs every hook event received.
 	Debug bool
 }
@@ -117,11 +124,13 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 		router:        newRouter(),
 		rules:         rules.Load(cfg.RulesPath),
 		fw:            firmware.NewChecker(cfg.FirmwareManifestURL),
+		usage:         usage.NewReader(cfg.UsageDir, cfg.UsageBudgetTokens),
 		bridgeVersion: cfg.BridgeVersion,
 	}
 	go d.dispatch()
 	go d.sweep(cfg.IdleAfter, cfg.BlockedIdleAfter, cfg.ForgetAfter)
 	go d.fw.Run(context.Background(), 30*time.Minute)
+	go d.usage.Run(context.Background(), time.Minute)
 	go d.consumeOTARequests()
 	return d
 }
@@ -152,7 +161,10 @@ func (d *Daemon) dispatch() {
 
 // broadcast renders the current store to the device.
 func (d *Daemon) broadcast() {
-	d.dev.Update(protocol.Snapshot{Sessions: prioritize(disambiguate(d.store.Snapshot()))})
+	d.dev.Update(protocol.Snapshot{
+		Sessions: prioritize(disambiguate(d.store.Snapshot())),
+		UsagePct: d.usage.Latest().Pct(),
+	})
 }
 
 // stateRank is the roster priority key: sessions that need you sort to the top,

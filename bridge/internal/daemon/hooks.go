@@ -186,10 +186,16 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	running := d.dev.FirmwareVersion()
 	latest := d.fw.Latest().Version
 	newer := firmware.Newer(running, latest)
+	u := d.usage.Latest()
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"connected": d.dev.Connected(),
 		"sessions":  d.store.Snapshot(),
+		"usage": map[string]any{
+			"pct":    u.Pct(),
+			"tokens": u.Tokens,
+			"budget": u.Budget,
+		},
 		"firmware": map[string]any{
 			"running":                  running,
 			"latest":                   latest,

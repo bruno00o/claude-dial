@@ -46,6 +46,8 @@ type SessionView struct {
 // Snapshot is the full state pushed to a Device on every change.
 type Snapshot struct {
 	Sessions []SessionView `json:"sessions"`
+	// UsagePct is how full the 5h usage window is (0..100), for the rim gauge.
+	UsagePct int `json:"usage_pct,omitempty"`
 }
 
 // Outbound is a single host -> device message (an RX write on the firmware).
@@ -58,13 +60,15 @@ type Outbound struct {
 	ToolName  string `json:"tool_name,omitempty"`
 	Command   string `json:"command,omitempty"`
 
-	// control messages: {"type":"set_time","epoch":…,"tz_offset":…,"host":"…"} and
-	// {"type":"ota_available","version":"0.6.0"} (empty version clears the prompt).
+	// control messages: {"type":"set_time","epoch":…,"tz_offset":…,"host":"…"},
+	// {"type":"ota_available","version":"0.6.0"} (empty version clears the prompt),
+	// and {"type":"usage","pct":42} (the 5h usage gauge).
 	Type     string `json:"type,omitempty"`
 	Epoch    int64  `json:"epoch,omitempty"`
 	TZOffset int    `json:"tz_offset,omitempty"`
 	Version  string `json:"version,omitempty"`
 	Host     string `json:"host,omitempty"` // the bridge's machine name, shown on the Dial
+	Pct      int    `json:"pct,omitempty"`  // usage gauge fill (0..100)
 }
 
 // Decision is a device -> host message: the user's answer on the dial.
