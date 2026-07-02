@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.0.0](https://github.com/bruno00o/claude-dial/compare/v0.17.0...v1.0.0) (2026-07-02)
+
+
+### Bug Fixes
+
+* **firmware:** keep screen text inside the round display and lighten the type ([04ebcad](https://github.com/bruno00o/claude-dial/commit/04ebcad9fa201776dceec48ab5d72ae22b11d6d3))
+* **firmware:** type colour palette as uint32_t so LovyanGFX renders RGB888 ([a9074e2](https://github.com/bruno00o/claude-dial/commit/a9074e23ecd1d3cf989a73886a6f9c9fd4a5b1ca))
+* **ui:** feed colours as RGB888, not raw RGB565 — amber was rendering green ([bba1af8](https://github.com/bruno00o/claude-dial/commit/bba1af8319bf168ed4141021ae09adf105ee03fa))
+
+
+### Miscellaneous Chores
+
+* release 1.0.0 ([7774481](https://github.com/bruno00o/claude-dial/commit/777448143db3b00208793160b8ec057b0f0ae39b))
+
 ## [0.17.0](https://github.com/bruno00o/claude-dial/compare/v0.16.0...v0.17.0) (2026-07-02)
 
 
