@@ -49,3 +49,14 @@ func (f *fanout) Connected() bool {
 func (f *fanout) Decisions() <-chan protocol.Decision {
 	return f.decisions
 }
+
+// FirmwareVersion returns the first non-empty version among the devices — in
+// practice the BLE Dial's, since the simulator has none.
+func (f *fanout) FirmwareVersion() string {
+	for _, d := range f.devices {
+		if v := d.FirmwareVersion(); v != "" {
+			return v
+		}
+	}
+	return ""
+}

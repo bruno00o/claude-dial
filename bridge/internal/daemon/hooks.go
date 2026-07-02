@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/bruno00o/claude-dial/bridge/internal/firmware"
 	"github.com/bruno00o/claude-dial/bridge/internal/protocol"
 )
 
@@ -166,10 +167,17 @@ func (d *Daemon) handlePreToolUse(w http.ResponseWriter, r *http.Request, in hoo
 }
 
 func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
+	running := d.dev.FirmwareVersion()
+	latest := d.fw.Latest().Version
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"connected": d.dev.Connected(),
 		"sessions":  d.store.Snapshot(),
+		"firmware": map[string]any{
+			"running":          running,
+			"latest":           latest,
+			"update_available": firmware.Newer(running, latest),
+		},
 	})
 }
 

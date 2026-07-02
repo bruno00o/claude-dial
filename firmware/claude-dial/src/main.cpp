@@ -86,6 +86,11 @@ static int  newSession(const char* sid);
 static void removeSession(const char* sid);
 static int  activeSessions();
 static void sendDecision(const char* sid, const char* decision);
+static void sendHello();
+
+// Firmware version, announced to the host on connect so the bridge can flag an
+// available OTA update. Kept in sync with the bridge release.
+static const char* FW_VERSION = "0.4.0";  // x-release-please-version
 
 static bool permInQueue(const char* sid);
 static void permEnqueue(const char* sid);
@@ -300,6 +305,7 @@ static void handleRxMessage(const char* data, uint16_t len) {
       M5Dial.Rtc.setDateTime(dt);
       needsRedraw = true;
     }
+    sendHello();  // piggyback our version now that the host is subscribed
     return;
   }
 
@@ -344,6 +350,20 @@ static void sendDecision(const char* sid, const char* decision) {
   doc["session_id"] = sid;
   doc["decision"]   = decision;
   char buf[128];
+  size_t n = serializeJson(doc, buf, sizeof(buf));
+  txChar->setValue((uint8_t*)buf, n);
+  txChar->notify();
+}
+
+// Announce our firmware version to the host. Sent in reply to set_time, which
+// the host writes right after subscribing to TX — so the notify is guaranteed
+// to be received (no connect-time race on the subscription).
+static void sendHello() {
+  if (!txChar || !bleConnected) return;
+  JsonDocument doc;
+  doc["type"] = "hello";
+  doc["fw"]   = FW_VERSION;
+  char buf[64];
   size_t n = serializeJson(doc, buf, sizeof(buf));
   txChar->setValue((uint8_t*)buf, n);
   txChar->notify();

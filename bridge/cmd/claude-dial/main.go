@@ -11,6 +11,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -44,6 +45,8 @@ func main() {
 		cmdService(os.Args[2:])
 	case "status":
 		cmdStatus(os.Args[2:])
+	case "firmware":
+		cmdFirmware(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("claude-dial", version)
 	case "help", "--help", "-h":
@@ -65,6 +68,7 @@ func usage() {
   service install   keep the daemon running at login via launchd (use --write)
   service uninstall  remove the launchd agent (use --write)
   service status    show whether the agent is loaded
+  firmware status   show the Dial's firmware version and whether an update exists
   status            query a running daemon
   version
 `)
@@ -221,6 +225,46 @@ func cmdStatus(args []string) {
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
 	fmt.Println(string(body))
+}
+
+func cmdFirmware(args []string) {
+	if len(args) == 0 || args[0] != "status" {
+		fmt.Fprintln(os.Stderr, "firmware: expected status")
+		os.Exit(2)
+	}
+	fs := flag.NewFlagSet("firmware status", flag.ExitOnError)
+	port := fs.Int("port", defaultPort(), "daemon port")
+	_ = fs.Parse(args[1:])
+
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/status", *port))
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "daemon not reachable:", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	var s struct {
+		Firmware struct {
+			Running         string `json:"running"`
+			Latest          string `json:"latest"`
+			UpdateAvailable bool   `json:"update_available"`
+		} `json:"firmware"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+		fmt.Fprintln(os.Stderr, "unexpected daemon response:", err)
+		os.Exit(1)
+	}
+
+	fw := s.Firmware
+	switch {
+	case fw.Running == "":
+		fmt.Println("dial: not connected (no firmware version reported)")
+	case fw.UpdateAvailable:
+		fmt.Printf("dial %s — update available: %s\n", fw.Running, fw.Latest)
+	case fw.Latest == "":
+		fmt.Printf("dial %s — latest version unknown (no manifest published yet)\n", fw.Running)
+	default:
+		fmt.Printf("dial %s — up to date\n", fw.Running)
+	}
 }
 
 func defaultPort() int {

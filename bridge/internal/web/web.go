@@ -75,6 +75,10 @@ func (h *Hub) Decisions() <-chan protocol.Decision {
 	return h.decisions
 }
 
+// FirmwareVersion is always "" — the simulator is not a physical device with
+// firmware to update. Implements daemon.Device.
+func (h *Hub) FirmwareVersion() string { return "" }
+
 func (h *Hub) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)

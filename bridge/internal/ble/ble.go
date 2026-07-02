@@ -53,6 +53,7 @@ type Device struct {
 	connected bool
 	conn      bluetooth.Device // current connection, for forcing a reconnect
 	hasConn   bool
+	firmware  string // version the Dial announced on connect ("" until it does)
 	last      map[string]protocol.SessionView
 
 	pending   chan protocol.Snapshot // coalescing hand-off to the writer goroutine
@@ -198,8 +199,17 @@ func (d *Device) setup(device bluetooth.Device) error {
 	return nil
 }
 
-// onNotify handles a decision coming back from the dial.
+// onNotify handles a message coming back from the dial: either a hello (the
+// firmware version, sent on connect) or a decision (the user's dial answer).
 func (d *Device) onNotify(buf []byte) {
+	var hello protocol.DeviceHello
+	if json.Unmarshal(buf, &hello) == nil && hello.Type == "hello" {
+		d.mu.Lock()
+		d.firmware = hello.Firmware
+		d.mu.Unlock()
+		d.logf("dial firmware %s", hello.Firmware)
+		return
+	}
 	var dec protocol.Decision
 	if err := json.Unmarshal(buf, &dec); err != nil || dec.SessionID == "" {
 		return
@@ -208,6 +218,14 @@ func (d *Device) onNotify(buf []byte) {
 	case d.decisions <- dec:
 	default:
 	}
+}
+
+// FirmwareVersion returns the version the connected Dial announced, or "" if no
+// Dial is connected or it hasn't announced one yet. Implements daemon.Device.
+func (d *Device) FirmwareVersion() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.firmware
 }
 
 // Update hands the latest snapshot to the writer goroutine. Implements
@@ -391,6 +409,7 @@ func (d *Device) setConnected(v bool) {
 	d.connected = v
 	if !v {
 		d.hasRX = false
+		d.firmware = ""
 		d.last = map[string]protocol.SessionView{}
 	}
 	d.mu.Unlock()

@@ -42,11 +42,11 @@ func TestBashPrefixMatch(t *testing.T) {
 	}
 
 	denied := []string{
-		"npm testfoo",   // not a word boundary
-		"npm publish",   // different subcommand
-		"npm",           // shorter than the prefix
-		"NPM test",      // case-sensitive
-		"npmtest",       // no boundary at all
+		"npm testfoo", // not a word boundary
+		"npm publish", // different subcommand
+		"npm",         // shorter than the prefix
+		"NPM test",    // case-sensitive
+		"npmtest",     // no boundary at all
 	}
 	for _, c := range denied {
 		if s.Allowed("s1", "Bash", c) {

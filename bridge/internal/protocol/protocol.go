@@ -69,3 +69,11 @@ type Decision struct {
 	SessionID string `json:"session_id"`
 	Decision  string `json:"decision"`
 }
+
+// DeviceHello is a device -> host announcement sent on connect ({"type":"hello",
+// "fw":"0.4.0"}). It carries the running firmware version so the daemon can flag
+// an available OTA update.
+type DeviceHello struct {
+	Type     string `json:"type"`
+	Firmware string `json:"fw"`
+}

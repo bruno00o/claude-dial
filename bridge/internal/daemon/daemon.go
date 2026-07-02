@@ -4,8 +4,10 @@
 package daemon
 
 import (
+	"context"
 	"time"
 
+	"github.com/bruno00o/claude-dial/bridge/internal/firmware"
 	"github.com/bruno00o/claude-dial/bridge/internal/protocol"
 	"github.com/bruno00o/claude-dial/bridge/internal/rules"
 	"github.com/bruno00o/claude-dial/bridge/internal/session"
@@ -20,6 +22,9 @@ type Device interface {
 	Connected() bool
 	// Decisions streams the user's answers back from the device.
 	Decisions() <-chan protocol.Decision
+	// FirmwareVersion is the version the device reported, or "" if it has none
+	// (the web simulator) or hasn't announced one yet.
+	FirmwareVersion() string
 }
 
 // Daemon wires the session store to a device.
@@ -31,6 +36,7 @@ type Daemon struct {
 
 	router *router
 	rules  *rules.Store
+	fw     *firmware.Checker
 }
 
 // Config tunes the daemon.
@@ -59,6 +65,9 @@ type Config struct {
 	// RulesPath is the JSON file backing per-session "always allow" grants.
 	// Empty keeps them in memory only (lost on restart).
 	RulesPath string
+	// FirmwareManifestURL overrides where the latest-firmware manifest is fetched
+	// from. Empty uses firmware.DefaultManifestURL (the GitHub latest release).
+	FirmwareManifestURL string
 	// Debug logs every hook event received.
 	Debug bool
 }
@@ -84,9 +93,11 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 		debug:   cfg.Debug,
 		router:  newRouter(),
 		rules:   rules.Load(cfg.RulesPath),
+		fw:      firmware.NewChecker(cfg.FirmwareManifestURL),
 	}
 	go d.dispatch()
 	go d.sweep(cfg.IdleAfter, cfg.BlockedIdleAfter, cfg.ForgetAfter)
+	go d.fw.Run(context.Background(), 30*time.Minute)
 	return d
 }
 
