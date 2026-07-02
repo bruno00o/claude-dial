@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.13.0](https://github.com/bruno00o/claude-dial/compare/v0.12.0...v0.13.0) (2026-07-02)
+
+
+### Features
+
+* **ui:** show which machine the Dial is connected to ([ac494a5](https://github.com/bruno00o/claude-dial/commit/ac494a5212a3584057c75374c49e15e845c752b4))
+
 ## [0.12.0](https://github.com/bruno00o/claude-dial/compare/v0.11.0...v0.12.0) (2026-07-02)
 
 
