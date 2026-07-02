@@ -66,6 +66,24 @@ func (s *Store) Touch(id, project, state string) {
 	s.ensure(id, project).State = state
 }
 
+// TouchLiveness refreshes a session from a weak liveness signal (an assistant
+// message rendering). It asserts "working" for idle/working/new sessions, but
+// leaves a waiting session (blocked or an active permission) untouched — a
+// message rendering while a permission is on screen (e.g. AskUserQuestion draws
+// its prompt in the same instant PermissionRequest fires) must not un-block the
+// session, or the "needs you" cue is clobbered before it's ever seen. It also
+// does not refresh the timestamp of a waiting session, so its decay window stays
+// anchored to when the request appeared.
+func (s *Store) TouchLiveness(id, project string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if ss := s.byID[id]; ss != nil &&
+		(ss.State == protocol.StateBlocked || ss.State == protocol.StatePermission) {
+		return
+	}
+	s.ensure(id, project).State = protocol.StateWorking
+}
+
 // SetState updates only the state of an existing session.
 func (s *Store) SetState(id, state string) {
 	s.mu.Lock()

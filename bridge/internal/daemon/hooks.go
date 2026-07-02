@@ -86,8 +86,12 @@ func (d *Daemon) handleEvent(w http.ResponseWriter, in hookInput) {
 	case "SessionStart", "Stop", "Notification":
 		// Notification is installed with the idle_prompt matcher only.
 		d.store.Touch(in.SessionID, project, protocol.StateIdle)
-	case "UserPromptSubmit", "PostToolUse", "PostToolUseFailure", "MessageDisplay":
+	case "UserPromptSubmit", "PostToolUse", "PostToolUseFailure":
+		// A tool finishing / a new turn resolves any pending permission.
 		d.store.Touch(in.SessionID, project, protocol.StateWorking)
+	case "MessageDisplay":
+		// Weak liveness: must not un-block a session waiting on a permission.
+		d.store.TouchLiveness(in.SessionID, project)
 	case "PreToolUse": // monitor-mode notifier: a tool is starting right now
 		d.store.Upsert(in.SessionID, project, protocol.StateWorking,
 			in.ToolName, extractCommand(in.ToolInput))
