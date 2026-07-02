@@ -12,9 +12,25 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - id: release
         uses: googleapis/release-please-action@v4
         with:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  # When release-please cuts a release, build and attach its artifacts in the
+  # same run. This sidesteps GitHub's rule that a GITHUB_TOKEN-created release
+  # can't trigger another workflow — no PAT required.
+  release-artifacts:
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    permissions:
+      contents: write
+    secrets: inherit
+    uses: ./.github/workflows/release-binaries.yml
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
