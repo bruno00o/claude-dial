@@ -15,3 +15,6 @@ CLAUDE.md
 # PlatformIO / firmware
 firmware/**/.pio/
 firmware/**/.vscode/
+
+# CI-generated firmware version stamp (see release-binaries.yml)
+firmware/claude-dial/src/version_override.h

@@ -89,8 +89,19 @@ static void sendDecision(const char* sid, const char* decision);
 static void sendHello();
 
 // Firmware version, announced to the host on connect so the bridge can flag an
-// available OTA update. Kept in sync with the bridge release.
-static const char* FW_VERSION = "0.4.0";  // x-release-please-version
+// available OTA update. CI injects the exact release version via a generated
+// version_override.h (see the firmware release job) so a published image always
+// reports its true version; the fallback below is for local/dev builds and is
+// kept current by release-please.
+#if defined(__has_include)
+#  if __has_include("version_override.h")
+#    include "version_override.h"
+#  endif
+#endif
+#ifndef CLAUDE_DIAL_FW_VERSION
+#  define CLAUDE_DIAL_FW_VERSION "0.4.0"  // x-release-please-version
+#endif
+static const char* FW_VERSION = CLAUDE_DIAL_FW_VERSION;
 
 static bool permInQueue(const char* sid);
 static void permEnqueue(const char* sid);

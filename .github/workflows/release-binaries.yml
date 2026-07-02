@@ -113,7 +113,13 @@ jobs:
         run: pip install --upgrade platformio
 
       - name: Build firmware
-        run: pio run -d firmware/claude-dial
+        run: |
+          TAG="${{ github.event.inputs.tag || github.event.release.tag_name }}"
+          # Stamp the real release version into the image so it reports its true
+          # version to the host, independent of the source fallback.
+          printf '#define CLAUDE_DIAL_FW_VERSION "%s"\n' "${TAG#v}" \
+            > firmware/claude-dial/src/version_override.h
+          pio run -d firmware/claude-dial
 
       - name: Package image + manifest
         id: pkg
