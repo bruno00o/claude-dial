@@ -86,20 +86,45 @@ func hookURL(port int, query string) string {
 	return u
 }
 
-// hookGroup is one matcher-group holding our HTTP hook.
+// hookCommand is the shell command our hook runs: POST the event (piped on
+// stdin) to the daemon and echo its JSON reply on stdout. The trailing `|| true`
+// is the whole point — when the daemon is down, curl fails, we still exit 0 with
+// empty output, so Claude Code stays completely silent and proceeds as usual
+// (the golden rule). A `type:"http"` hook can't guarantee that: some Claude Code
+// versions surface a connection-refused as a visible "hook error" line.
+func hookCommand(port int, e managedEvent) string {
+	return fmt.Sprintf(
+		"curl -s -m %d -X POST '%s' -H 'content-type: application/json' -d @- || true",
+		e.Timeout, hookURL(port, e.Query))
+}
+
+// hookGroup is one matcher-group holding our command hook. It shells out to curl
+// rather than using type:"http" so a down daemon never prints an error (see
+// hookCommand). The daemon already speaks the hook JSON contract, so its reply is
+// forwarded verbatim: a decision for PreToolUse, "{}" for the liveness notifiers.
 func hookGroup(port int, e managedEvent) map[string]any {
 	return map[string]any{
 		"matcher": e.Matcher,
 		"hooks": []any{map[string]any{
-			"type":    "http",
-			"url":     hookURL(port, e.Query),
-			"timeout": e.Timeout,
+			"type":    "command",
+			"command": hookCommand(port, e),
+			// Give Claude Code's own timeout a margin over curl's -m so it never
+			// hard-kills the command mid-response.
+			"timeout": e.Timeout + 5,
 		}},
 	}
 }
 
-// isOursGroup reports whether a matcher-group is a claude-dial group (contains an
-// HTTP hook pointing at a localhost /hook endpoint).
+// isOurHookRef reports whether s points at a claude-dial localhost /hook endpoint
+// (a curl target in a command, or a legacy type:"http" url).
+func isOurHookRef(s string) bool {
+	return strings.Contains(s, "/hook") &&
+		(strings.Contains(s, "localhost") || strings.Contains(s, "127.0.0.1"))
+}
+
+// isOursGroup reports whether a matcher-group is a claude-dial group. It matches
+// both the current command hooks and legacy type:"http" hooks, so re-running
+// install upgrades cleanly and uninstall removes either.
 func isOursGroup(g any) bool {
 	gm, ok := g.(map[string]any)
 	if !ok {
@@ -114,13 +139,15 @@ func isOursGroup(g any) bool {
 		if !ok {
 			continue
 		}
-		if hm["type"] != "http" {
-			continue
-		}
-		if u, ok := hm["url"].(string); ok &&
-			strings.Contains(u, "/hook") &&
-			(strings.Contains(u, "localhost") || strings.Contains(u, "127.0.0.1")) {
-			return true
+		switch hm["type"] {
+		case "command":
+			if c, ok := hm["command"].(string); ok && isOurHookRef(c) {
+				return true
+			}
+		case "http":
+			if u, ok := hm["url"].(string); ok && isOurHookRef(u) {
+				return true
+			}
 		}
 	}
 	return false
