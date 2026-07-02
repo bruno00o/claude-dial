@@ -93,3 +93,47 @@ jobs:
           git add "$formula"
           git commit -m "claude-dial ${VERSION}" || { echo "formula already up to date"; exit 0; }
           git push
+
+  # Build the Dial firmware and publish the app image + a firmware.json manifest
+  # to the release. The daemon reads that manifest (releases/latest/download/
+  # firmware.json) to flag available OTA updates; the .bin is what a future OTA
+  # push (phase 2) flashes to the Dial's inactive partition.
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Install PlatformIO
+        run: pip install --upgrade platformio
+
+      - name: Build firmware
+        run: pio run -d firmware/claude-dial
+
+      - name: Package image + manifest
+        id: pkg
+        run: |
+          TAG="${{ github.event.inputs.tag || github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          BIN="claude-dial-firmware_${TAG}_esp32s3.bin"
+          cp firmware/claude-dial/.pio/build/m5stack-dial/firmware.bin "$BIN"
+          SHA="$(shasum -a 256 "$BIN" | cut -d' ' -f1)"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${BIN}"
+          printf '{\n  "version": "%s",\n  "url": "%s",\n  "sha256": "%s"\n}\n' \
+            "$VERSION" "$URL" "$SHA" > firmware.json
+          cat firmware.json
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.pkg.outputs.tag }}" \
+            "${{ steps.pkg.outputs.bin }}" firmware.json \
+            --clobber --repo "$GITHUB_REPOSITORY"

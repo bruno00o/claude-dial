@@ -11,7 +11,8 @@
       "bump-patch-for-minor-pre-major": false,
       "pull-request-title-pattern": "chore(release): ${version}",
       "extra-files": [
-        { "type": "generic", "path": "bridge/cmd/claude-dial/main.go" }
+        { "type": "generic", "path": "bridge/cmd/claude-dial/main.go" },
+        { "type": "generic", "path": "firmware/claude-dial/src/main.cpp" }
       ]
     }
   }
