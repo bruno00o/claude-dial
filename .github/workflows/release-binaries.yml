@@ -18,14 +18,11 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      matrix:
-        include:
-          - runner: macos-14 # Apple Silicon
-            arch: arm64
-          - runner: macos-13 # Intel
-            arch: amd64
-    runs-on: ${{ matrix.runner }}
+    # Apple Silicon only — GitHub's Intel macOS runners are being retired and the
+    # bridge ships to arm64 Macs. Add a macos-13/amd64 matrix entry to reinstate.
+    runs-on: macos-14
+    env:
+      arch: arm64
     steps:
       - uses: actions/checkout@v7
         with:
@@ -44,7 +41,7 @@ jobs:
         id: pkg
         run: |
           TAG="${{ github.event.inputs.tag || github.event.release.tag_name }}"
-          NAME="claude-dial_${TAG}_darwin_${{ matrix.arch }}.tar.gz"
+          NAME="claude-dial_${TAG}_darwin_${arch}.tar.gz"
           tar -czf "$NAME" claude-dial LICENSE README.md
           shasum -a 256 "$NAME" | tee "$NAME.sha256"
           echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
