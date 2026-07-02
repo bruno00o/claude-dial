@@ -66,19 +66,26 @@ func (s *Store) Touch(id, project, state string) {
 	s.ensure(id, project).State = state
 }
 
+// blockedRenderGrace separates two message-render cases on a waiting session: a
+// message within this window of the prompt appearing is part of *drawing* it
+// (e.g. AskUserQuestion renders text in the same instant PermissionRequest
+// fires) and must not clear the cue; a message arriving later means the
+// permission was answered and work resumed, so it should clear to working.
+const blockedRenderGrace = 3 * time.Second
+
 // TouchLiveness refreshes a session from a weak liveness signal (an assistant
-// message rendering). It asserts "working" for idle/working/new sessions, but
-// leaves a waiting session (blocked or an active permission) untouched — a
-// message rendering while a permission is on screen (e.g. AskUserQuestion draws
-// its prompt in the same instant PermissionRequest fires) must not un-block the
-// session, or the "needs you" cue is clobbered before it's ever seen. It also
-// does not refresh the timestamp of a waiting session, so its decay window stays
-// anchored to when the request appeared.
+// message rendering). It asserts "working" for idle/working/new sessions, and
+// for a waiting session only once past blockedRenderGrace — so the "needs you"
+// cue isn't clobbered the instant it appears, yet a genuinely resumed session
+// (you answered, Claude is replying again) doesn't stay stuck on "waiting". It
+// never refreshes a still-fresh waiting session's timestamp, so its decay window
+// stays anchored to when the request appeared.
 func (s *Store) TouchLiveness(id, project string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if ss := s.byID[id]; ss != nil &&
-		(ss.State == protocol.StateBlocked || ss.State == protocol.StatePermission) {
+		(ss.State == protocol.StateBlocked || ss.State == protocol.StatePermission) &&
+		s.now().Sub(ss.Updated) < blockedRenderGrace {
 		return
 	}
 	s.ensure(id, project).State = protocol.StateWorking
