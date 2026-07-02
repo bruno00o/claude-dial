@@ -433,7 +433,19 @@ static void drawSessionList() {
     bool working = strcmp(s.state, "working") == 0;
     bool waiting = strcmp(s.state, "blocked") == 0 ||
                    strcmp(s.state, "permission_request") == 0;
-    uint32_t col = working ? COL_AMBER : waiting ? COL_AMBER_HOT : COL_GRAY;
+    uint32_t col;
+    if (working) {
+      col = COL_AMBER;                    // busy: the warm orange
+    } else if (waiting) {
+      // needs-you: a warm-white row that breathes, so the eye lands on it and it
+      // never reads like the orange "working" state.
+      float ph = (millis() % 1100) / 1100.0f;
+      float k  = ph < 0.5f ? ph * 2.0f : (1.0f - ph) * 2.0f;   // triangle 0..1..0
+      uint8_t v = 120 + (uint8_t)(k * 135.0f);                 // 120..255
+      col = RGB565(v, v, (uint8_t)(v * 0.90f));                // slightly warm white
+    } else {
+      col = COL_GRAY;                     // idle
+    }
 
     char glyph[2] = { working ? SPINNER[spinFrame] : waiting ? '*' : '.', 0 };
     char label[16];
@@ -449,7 +461,7 @@ static void drawSessionList() {
   if (waits > 0) {
     canvas.setTextDatum(middle_center);
     char ft[20]; snprintf(ft, sizeof(ft), "%d waiting", waits);
-    canvas.setTextColor(COL_AMBER_HOT, COL_BG);
+    canvas.setTextColor(COL_INK, COL_BG);   // match the white "needs you" rows
     canvas.drawString(ft, CX, 206);
   }
 
@@ -850,10 +862,15 @@ void loop() {
   }
   if (appState == SESSION_LIST && millis() - lastFast > 150) {
     lastFast = millis();
-    bool anyWorking = false;
-    for (int i = 0; i < MAX_SESSIONS; i++)
-      if (sessions[i].active && strcmp(sessions[i].state, "working") == 0) anyWorking = true;
-    if (anyWorking) { spinFrame = (spinFrame + 1) & 3; needsRedraw = true; }
+    bool anyWorking = false, anyWaiting = false;
+    for (int i = 0; i < MAX_SESSIONS; i++) {
+      if (!sessions[i].active) continue;
+      const char* st = sessions[i].state;
+      if (strcmp(st, "working") == 0) anyWorking = true;
+      else if (strcmp(st, "blocked") == 0 || strcmp(st, "permission_request") == 0) anyWaiting = true;
+    }
+    if (anyWorking) spinFrame = (spinFrame + 1) & 3;      // advance the spinner
+    if (anyWorking || anyWaiting) needsRedraw = true;     // spinner and/or the needs-you pulse
   }
 
   if (needsRedraw) redraw();

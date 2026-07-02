@@ -44,9 +44,9 @@
   .row .st{font-size:11.5px;}
   .row.sel{color:var(--ink);} .row.sel .car{opacity:1;}
   .row.work{color:var(--amber); text-shadow:0 0 7px rgba(255,166,43,.4);}
-  .row.wait{color:var(--amber-hot); text-shadow:0 0 9px rgba(255,196,107,.55); animation:pulse 1.15s ease-in-out infinite;}
+  .row.wait{color:#F4EFE3; text-shadow:0 0 11px rgba(244,239,227,.6); animation:pulse 1.15s ease-in-out infinite;}
   .ft{display:flex; justify-content:space-between; font-size:11px; color:var(--dim); padding-top:11px;}
-  .ft .w{color:var(--amber-hot);}
+  .ft .w{color:#F4EFE3;}
   @keyframes pulse{0%,100%{opacity:.6;} 50%{opacity:1;}}
 
   /* permission */
@@ -125,7 +125,7 @@
         const nm=esc(s.project||s.session_id.slice(0,10));
         return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}"><span class="car">▸</span><span class="nm">${nm}</span><span class="st">${g} ${m.l}</span></div>`;
       }).join("");
-      inner=`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n">${list.length}</span> agent${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div><div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':'all clear'}</span><span>↻ ⏎ ✱</span></div></div>`;
+      inner=`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n">${list.length}</span> agent${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div><div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div></div>`;
     } else {
       const q=pending(), p=q[0], behind=q.length-1;
       const opts=OPTS.map((o,i)=>`<div class="opt ${o.rej?'rej':''} ${i===opt?'sel':''}" data-opt="${i}"><span class="car">▸</span>${o.label}</div>`).join("");
