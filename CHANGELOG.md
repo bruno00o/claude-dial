@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.0](https://github.com/bruno00o/claude-dial/compare/v0.14.0...v0.15.0) (2026-07-02)
+
+
+### Features
+
+* **ui:** first-run setup hint on the Dial ([2eb5b79](https://github.com/bruno00o/claude-dial/commit/2eb5b7918ab615ae7350ae85e3158205ecd6f763))
+
 ## [0.14.0](https://github.com/bruno00o/claude-dial/compare/v0.13.0...v0.14.0) (2026-07-02)
 
 
