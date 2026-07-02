@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.9.0](https://github.com/bruno00o/claude-dial/compare/v0.8.0...v0.9.0) (2026-07-02)
+
+
+### Features
+
+* **ui:** tap a choice directly on the Dial's touchscreen ([1d5f358](https://github.com/bruno00o/claude-dial/commit/1d5f358f71102b79ddf9820dad01675586021708))
+
 ## [0.8.0](https://github.com/bruno00o/claude-dial/compare/v0.7.0...v0.8.0) (2026-07-02)
 
 
