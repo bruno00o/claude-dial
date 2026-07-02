@@ -133,6 +133,7 @@ static void redraw();
 static void handleEncoder(int delta);
 static void handlePress();
 static void handleTouch(int x, int y);
+static void commitDecision();
 
 // ── App state (all mutated only from loop() context) ─────────────────────────
 static AppState appState = IDLE;
@@ -159,8 +160,14 @@ static int   listScrollOffset = 0;
 static uint8_t   brightness = 180;
 static Preferences prefs;
 
-static unsigned long confirmStart = 0;
-static char          confirmMsg[32] = "";
+// Decision grace window: a picked choice is NOT sent immediately. It waits
+// CONFIRM_MS on the CONFIRMING screen, where a tap/press undoes it; only when
+// the window elapses does the decision actually go to the host. That's what
+// makes undo real — nothing was transmitted yet, so there's nothing to walk back
+// on Claude Code's side.
+static const unsigned long CONFIRM_MS = 1500;
+static unsigned long confirmStart  = 0;
+static int           confirmChoice = 0;   // the deferred permChoice awaiting commit
 
 static bool needsRedraw = true;
 static bool buzzPending = false;
@@ -727,14 +734,32 @@ static void drawPermission() {
 
 static void drawConfirming() {
   drawBase();
+  bool rejected = (confirmChoice == 2);
+  uint32_t accent = rejected ? COL_RED : COL_AMBER;
+
+  // Depleting grace-window arc on the rim: when it empties the decision commits.
+  long remaining = (long)(confirmStart + CONFIRM_MS) - (long)millis();
+  if (remaining < 0) remaining = 0;
+  int arcR = 114, arcSteps = (int)(((float)remaining / CONFIRM_MS) * 180);
+  for (int i = 0; i < 180; i++) {
+    float a = (i / 180.0f) * 360.0f - 90.0f;
+    int ax = CX + (int)(arcR * cosf(a * DEG_TO_RAD));
+    int ay = CY + (int)(arcR * sinf(a * DEG_TO_RAD));
+    canvas.fillCircle(ax, ay, 1, (i < arcSteps) ? accent : COL_ARC_OFF);
+  }
+
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMonoBold18pt7b);
-  bool rejected = (strcmp(confirmMsg, "reject") == 0);
-  canvas.setTextColor(rejected ? COL_RED : COL_AMBER, COL_BG);
-  canvas.drawString("sent", CX, CY - 12);
   canvas.setFont(&fonts::FreeMono9pt7b);
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString(confirmMsg, CX, CY + 24);
+  canvas.drawString("sending", CX, 88);
+
+  canvas.setFont(&fonts::FreeMonoBold12pt7b);
+  canvas.setTextColor(accent, COL_BG);
+  canvas.drawString(choiceLabels[confirmChoice], CX, 118);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_INK, COL_BG);
+  canvas.drawString("tap to undo", CX, 156);
   canvas.pushSprite(0, 0);
 }
 
@@ -965,24 +990,21 @@ static void handlePress() {
     case PERMISSION: {
       int idx = findSession(currentPermSid);
       if (idx < 0 || !sessions[idx].active) { permShowNext(); break; }
-      const char* dec = (permChoice == 0) ? "allow_once"
-                      : (permChoice == 1) ? "always_allow" : "reject";
-      sendDecision(currentPermSid, dec);
-
-      M5Dial.Speaker.tone(2000, 60); delay(80); M5Dial.Speaker.tone(2400, 60);
-
-      snprintf(confirmMsg, sizeof(confirmMsg), "%s", choiceLabels[permChoice]);
-      strlcpy(sessions[idx].state, (permChoice == 2) ? "idle" : "working",
-              sizeof(sessions[idx].state));
-      currentPermSid[0] = 0;
+      // Don't send yet — open the grace window. currentPermSid stays set so we
+      // can either commit or undo. commitDecision() (loop) sends when it elapses.
+      confirmChoice = permChoice;
+      M5Dial.Speaker.tone(1500, 30);        // soft "registered" tick
       appState     = CONFIRMING;
       confirmStart = millis();
       needsRedraw  = true;
       break;
     }
 
-    case CONFIRMING:
-      permShowNext();
+    case CONFIRMING:                         // undo — nothing was sent, back to the choice
+      M5Dial.Speaker.tone(700, 40); delay(55); M5Dial.Speaker.tone(500, 40);
+      permChoice  = confirmChoice;           // keep the selection they had
+      appState    = PERMISSION;
+      needsRedraw = true;
       break;
 
     case OTA_PROMPT:
@@ -1068,6 +1090,22 @@ static void handleTouch(int x, int y) {
 
     default: break;                                    // idle / clock / roster: ignore taps
   }
+}
+
+// commitDecision fires when the grace window elapses without an undo: only now
+// is the decision actually sent to the host. Optimistically updates the local
+// row state, plays the "sent" earcon, then advances to the next pending prompt.
+static void commitDecision() {
+  int idx = findSession(currentPermSid);
+  if (idx >= 0 && sessions[idx].active) {
+    const char* dec = (confirmChoice == 0) ? "allow_once"
+                    : (confirmChoice == 1) ? "always_allow" : "reject";
+    sendDecision(currentPermSid, dec);
+    strlcpy(sessions[idx].state, (confirmChoice == 2) ? "idle" : "working",
+            sizeof(sessions[idx].state));
+    M5Dial.Speaker.tone(2000, 60); delay(80); M5Dial.Speaker.tone(2400, 60);
+  }
+  permShowNext();
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1211,9 +1249,9 @@ void loop() {
   auto tp = M5Dial.Touch.getDetail();
   if (tp.wasClicked()) handleTouch(tp.x, tp.y);
 
-  // Confirming auto-dismiss -> show next pending (or fall back)
-  if (appState == CONFIRMING && (millis() - confirmStart) > 1500) {
-    permShowNext();
+  // Grace window elapsed with no undo -> the decision is finally sent.
+  if (appState == CONFIRMING && (millis() - confirmStart) > CONFIRM_MS) {
+    commitDecision();
   }
 
   // OTA install requested but the host never started the stream -> back to choice.
@@ -1239,6 +1277,9 @@ void loop() {
     lastSlow = millis(); needsRedraw = true;
   }
   if (appState == PERMISSION && millis() - lastFast > 1000) {
+    lastFast = millis(); needsRedraw = true;
+  }
+  if (appState == CONFIRMING && millis() - lastFast > 100) {   // animate the undo arc
     lastFast = millis(); needsRedraw = true;
   }
   if (appState == SESSION_LIST && millis() - lastFast > 150) {
