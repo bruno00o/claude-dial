@@ -17,11 +17,13 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/bruno00o/claude-dial/bridge/internal/ble"
 	"github.com/bruno00o/claude-dial/bridge/internal/daemon"
 	"github.com/bruno00o/claude-dial/bridge/internal/hooks"
+	"github.com/bruno00o/claude-dial/bridge/internal/service"
 	"github.com/bruno00o/claude-dial/bridge/internal/session"
 	"github.com/bruno00o/claude-dial/bridge/internal/web"
 )
@@ -38,6 +40,8 @@ func main() {
 		cmdServe(os.Args[2:])
 	case "hooks":
 		cmdHooks(os.Args[2:])
+	case "service":
+		cmdService(os.Args[2:])
 	case "status":
 		cmdStatus(os.Args[2:])
 	case "version", "--version", "-v":
@@ -58,6 +62,9 @@ func usage() {
   hooks print       show the settings.json snippet
   hooks install     write the hooks into ~/.claude/settings.json (use --write)
   hooks uninstall   remove them (use --write)
+  service install   keep the daemon running at login via launchd (use --write)
+  service uninstall  remove the launchd agent (use --write)
+  service status    show whether the agent is loaded
   status            query a running daemon
   version
 `)
@@ -146,6 +153,57 @@ func cmdHooks(args []string) {
 		fmt.Printf("Removed hooks from %s\n", path)
 	default:
 		fmt.Fprintf(os.Stderr, "hooks: unknown subcommand %q\n", sub)
+		os.Exit(2)
+	}
+}
+
+func cmdService(args []string) {
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "service: expected install|uninstall|status")
+		os.Exit(2)
+	}
+	sub, rest := args[0], args[1:]
+	fs := flag.NewFlagSet("service "+sub, flag.ExitOnError)
+	port := fs.Int("port", defaultPort(), "daemon port the agent serves on")
+	useBLE := fs.Bool("ble", false, "run the daemon with --ble (drive the physical Dial)")
+	write := fs.Bool("write", false, "actually load/unload the launchd agent")
+	_ = fs.Parse(rest)
+
+	switch sub {
+	case "install":
+		exe, err := os.Executable()
+		check(err)
+		if resolved, err := filepath.EvalSymlinks(exe); err == nil {
+			exe = resolved
+		}
+		opts := service.Options{Exec: exe, Port: *port, BLE: *useBLE}
+		plistPath, _ := service.PlistPath()
+		if !*write {
+			logPath, _ := service.LogPath()
+			fmt.Printf("Would install a launchd agent at %s running:\n\n  %s %s\n\nLogs go to %s. Re-run with --write to load it.\n\n%s\n",
+				plistPath, exe, strings.Join(service.ServeArgs(opts), " "), logPath, service.Plist(opts, logPath))
+			return
+		}
+		path, err := service.Install(opts)
+		check(err)
+		fmt.Printf("Installed and loaded launchd agent %s\n  plist: %s\n  the daemon now starts at login and respawns if it exits.\n", service.Label, path)
+	case "uninstall":
+		if !*write {
+			fmt.Println("Would unload the launchd agent and remove its plist. Re-run with --write to apply.")
+			return
+		}
+		path, err := service.Uninstall()
+		check(err)
+		fmt.Printf("Removed launchd agent %s (plist %s)\n", service.Label, path)
+	case "status":
+		if service.Loaded() {
+			path, _ := service.PlistPath()
+			fmt.Printf("loaded (%s)\n", path)
+		} else {
+			fmt.Println("not loaded")
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "service: unknown subcommand %q\n", sub)
 		os.Exit(2)
 	}
 }
