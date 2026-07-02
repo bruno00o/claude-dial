@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.0](https://github.com/bruno00o/claude-dial/compare/v0.13.0...v0.14.0) (2026-07-02)
+
+
+### Features
+
+* **ui:** a ring of dots around the rim — the recurring "dial" motif ([42905ec](https://github.com/bruno00o/claude-dial/commit/42905ec6b133c89021713205e778605210336ddd))
+* **ui:** borrow M5 factory-UI polish — detent ticks, edge fade, wipe, boot fade ([42531c8](https://github.com/bruno00o/claude-dial/commit/42531c8f3f3d847cae0ae0ca1854068c511b06d1))
+* **ui:** Settings → connection screen ([9b7b623](https://github.com/bruno00o/claude-dial/commit/9b7b623f0ba7bd92e35d586363d8bfeb41601ea0))
+* **usage:** 5h usage gauge on the rim from local transcripts ([584c082](https://github.com/bruno00o/claude-dial/commit/584c0829b6cd317b7e5f1a1cb9081aba60616066))
+
 ## [0.13.0](https://github.com/bruno00o/claude-dial/compare/v0.12.0...v0.13.0) (2026-07-02)
 
 
