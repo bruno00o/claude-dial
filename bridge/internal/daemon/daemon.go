@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"sort"
 	"sync/atomic"
 	"time"
 
@@ -142,7 +143,32 @@ func (d *Daemon) dispatch() {
 
 // broadcast renders the current store to the device.
 func (d *Daemon) broadcast() {
-	d.dev.Update(protocol.Snapshot{Sessions: disambiguate(d.store.Snapshot())})
+	d.dev.Update(protocol.Snapshot{Sessions: prioritize(disambiguate(d.store.Snapshot()))})
+}
+
+// stateRank is the roster priority key: sessions that need you sort to the top,
+// idle ones sink to the bottom. Lower = nearer the top.
+func stateRank(state string) int {
+	switch state {
+	case protocol.StatePermission, protocol.StateBlocked:
+		return 0 // needs you — surface first
+	case protocol.StateWorking:
+		return 1
+	default:
+		return 2 // idle (and any unknown state)
+	}
+}
+
+// prioritize reorders the roster so it reads needs-you → working → idle, keeping
+// the store's insertion order within each tier (a stable sort, so rows don't
+// jump around from tick to tick). Done once here so every device shows the same
+// order: the simulator renders this slice directly; the BLE Dial re-buckets by
+// session id into its own slots, so its render mirrors this same ranking.
+func prioritize(sessions []protocol.SessionView) []protocol.SessionView {
+	sort.SliceStable(sessions, func(i, j int) bool {
+		return stateRank(sessions[i].State) < stateRank(sessions[j].State)
+	})
+	return sessions
 }
 
 // disambiguate makes each session's display name unique. When two or more

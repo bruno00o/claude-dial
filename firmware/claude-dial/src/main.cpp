@@ -555,6 +555,16 @@ static void drawIdle() {
   canvas.pushSprite(0, 0);
 }
 
+// Roster priority, mirroring the daemon's prioritize(): needs-you → working →
+// idle. The daemon already sorts the snapshot, but the Dial re-buckets sessions
+// into its own slots by id, so it re-applies the same ranking at render time.
+static int sessionRank(const Session& s) {
+  if (strcmp(s.state, "blocked") == 0 ||
+      strcmp(s.state, "permission_request") == 0) return 0;   // needs you
+  if (strcmp(s.state, "working") == 0)            return 1;
+  return 2;                                                    // idle
+}
+
 static void drawSessionList() {
   drawBase();
 
@@ -564,6 +574,14 @@ static void drawSessionList() {
     active[n++] = i;
     if (strcmp(sessions[i].state, "blocked") == 0 ||
         strcmp(sessions[i].state, "permission_request") == 0) waits++;
+  }
+
+  // Stable insertion sort by priority — keeps slot order within a tier so rows
+  // don't jump around, and n <= MAX_SESSIONS (8) so this is trivially cheap.
+  for (int i = 1; i < n; i++) {
+    int v = active[i], r = sessionRank(sessions[v]), j = i - 1;
+    while (j >= 0 && sessionRank(sessions[active[j]]) > r) { active[j + 1] = active[j]; j--; }
+    active[j + 1] = v;
   }
 
   // header — "N agents" (dim)
