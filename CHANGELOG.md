@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.10.0](https://github.com/bruno00o/claude-dial/compare/v0.9.0...v0.10.0) (2026-07-02)
+
+
+### Features
+
+* **ota:** never flash firmware newer than the bridge ([e06a811](https://github.com/bruno00o/claude-dial/commit/e06a811b39f834b2bd01f30dc485c0690821fd27))
+* **ui:** undo a permission decision within a grace window ([8c4a301](https://github.com/bruno00o/claude-dial/commit/8c4a3010cbe4f3ff76bd4d569cd459d8ebd16b0c))
+
 ## [0.9.0](https://github.com/bruno00o/claude-dial/compare/v0.8.0...v0.9.0) (2026-07-02)
 
 
