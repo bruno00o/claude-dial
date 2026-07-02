@@ -30,7 +30,7 @@ import (
 	"github.com/bruno00o/claude-dial/bridge/internal/web"
 )
 
-const version = "0.11.0" // x-release-please-version
+const version = "0.12.0" // x-release-please-version
 
 func main() {
 	if len(os.Args) < 2 {
