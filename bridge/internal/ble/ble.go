@@ -225,10 +225,10 @@ func (d *Device) Update(snap protocol.Snapshot) {
 	}
 }
 
-// writer serializes all BLE writes off the caller's goroutine. When writes stay
-// wedged (the TX buffer never drains — each WriteWithoutResponse then blocks for
-// seconds before failing), it forces a reconnect to clear the link rather than
-// leaving the Dial frozen on a stale view.
+// writer serializes all BLE writes off the caller's goroutine. A with-response
+// write that keeps timing out means the ATT ack never comes — the link stalled —
+// so it forces a reconnect to clear it rather than leaving the Dial frozen on a
+// stale view.
 func (d *Device) writer() {
 	fails := 0
 	var lastReset time.Time
@@ -355,12 +355,19 @@ func displayEqual(a, b protocol.SessionView) bool {
 	return true
 }
 
-// write pushes one message to the Dial, returning whether it landed. One attempt
-// only: WriteWithoutResponse itself blocks for seconds when the TX buffer is full
-// ("timed out waiting for buffer space"), so a retry loop here would starve the
-// writer for that long × N. A dropped update is re-sent on the next broadcast
-// (flush records delivery only on success), and a persistently wedged link is
-// reconnected by the writer.
+// write pushes one message to the Dial, returning whether it landed. It uses
+// Write (with response), not WriteWithoutResponse, on purpose: on macOS
+// CoreBluetooth's CanSendWriteWithoutResponse flag is unreliable — the
+// peripheralIsReadyToSendWriteWithoutResponse callback that clears it can get
+// stuck false forever (a long-standing Apple bug), so tinygo's
+// WriteWithoutResponse spins on that flag and fails with "timed out waiting for
+// buffer space", wedging the link until the whole CBCentralManager is torn down.
+// A burst of writes was enough to trip it. Write instead waits on the ATT write
+// response — a reliable core-protocol ack — and that per-write ack gives natural
+// back-pressure that paces us to the link and makes a buffer overflow impossible.
+// Throughput is irrelevant here: updates are small, infrequent, and coalesced.
+// A dropped update is re-sent on the next broadcast (flush records delivery only
+// on success), and a persistently wedged link is reconnected by the writer.
 func (d *Device) write(msg protocol.Outbound) bool {
 	d.mu.Lock()
 	rx, ok := d.rxChar, d.hasRX
@@ -372,7 +379,7 @@ func (d *Device) write(msg protocol.Outbound) bool {
 	if err != nil {
 		return false
 	}
-	if _, err = rx.WriteWithoutResponse(payload); err != nil {
+	if _, err = rx.Write(payload); err != nil {
 		d.logf("write: %v", err)
 		return false
 	}
