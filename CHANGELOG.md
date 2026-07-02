@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.0](https://github.com/bruno00o/claude-dial/compare/v0.16.0...v0.17.0) (2026-07-02)
+
+
+### Features
+
+* **ui:** port the A+C screen direction — two-temperature terminal ([f3b0410](https://github.com/bruno00o/claude-dial/commit/f3b0410aeb0a18dca4a8b0526b011380c2bc5f42))
+
 ## [0.16.0](https://github.com/bruno00o/claude-dial/compare/v0.15.0...v0.16.0) (2026-07-02)
 
 
