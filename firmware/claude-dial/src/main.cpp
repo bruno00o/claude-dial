@@ -58,8 +58,9 @@
 #define COL_INK         RGB565(0xE9, 0xE2, 0xD6)   // selected row / command text
 #define COL_DIM         RGB565(0x8A, 0x81, 0x75)   // headers, footers, hints
 #define COL_GRAY        RGB565(0x6F, 0x69, 0x5F)   // idle rows
-#define COL_AMBER       RGB565(0xFF, 0xA6, 0x2B)   // active / accent (the orange)
-#define COL_AMBER_HOT   RGB565(0xFF, 0xC4, 0x6B)   // waiting rows, warnings
+#define COL_AMBER       RGB565(0xFF, 0xB0, 0x00)   // working / primary accent (A+C)
+#define COL_HOT         RGB565(0xFF, 0x7A, 0x18)   // needs-you / urgent — the 2nd temperature
+#define COL_AMBER_HOT   RGB565(0xFF, 0xC4, 0x6B)   // soft warning / usage mid-range
 #define COL_RED         RGB565(0xFF, 0x5B, 0x34)   // reject
 #define COL_RING        RGB565(0x2A, 0x23, 0x18)   // dim bezel ring
 #define COL_ARC_OFF     RGB565(0x14, 0x0F, 0x08)   // spent countdown-arc dots
@@ -740,7 +741,8 @@ static void drawSessionList() {
   canvas.setTextDatum(middle_center);
   canvas.setTextColor(COL_DIM, COL_BG);
   char hdr[24];
-  snprintf(hdr, sizeof(hdr), "%d agent%s", n, n == 1 ? "" : "s");
+  if (usagePct > 0) snprintf(hdr, sizeof(hdr), "%d agent%s  %d%%", n, n == 1 ? "" : "s", usagePct);
+  else              snprintf(hdr, sizeof(hdr), "%d agent%s", n, n == 1 ? "" : "s");
   canvas.drawString(hdr, CX, 40);
 
   if (n == 0) {                 // no agents — the daemon switches us back to the clock
@@ -762,14 +764,13 @@ static void drawSessionList() {
                    strcmp(s.state, "permission_request") == 0;
     uint32_t col;
     if (working) {
-      col = COL_AMBER;                    // busy: the warm orange
+      col = COL_AMBER;                    // busy: the amber (temperature 1)
     } else if (waiting) {
-      // needs-you: a warm-white row that breathes, so the eye lands on it and it
-      // never reads like the orange "working" state.
+      // needs-you: hot orange (temperature 2) that breathes, so the eye lands on
+      // it and it never reads like the amber "working" state.
       float ph = (millis() % 1100) / 1100.0f;
       float k  = ph < 0.5f ? ph * 2.0f : (1.0f - ph) * 2.0f;   // triangle 0..1..0
-      uint8_t v = 120 + (uint8_t)(k * 135.0f);                 // 120..255
-      col = RGB565(v, v, (uint8_t)(v * 0.90f));                // slightly warm white
+      col = dim565(COL_HOT, 150 + (int)(k * 105.0f), 255);     // pulse 150..255
     } else {
       col = COL_GRAY;                     // idle
     }
@@ -782,13 +783,17 @@ static void drawSessionList() {
       col = dim565(col, f, 255);
     }
 
-    char glyph[2] = { working ? SPINNER[spinFrame] : waiting ? '*' : '.', 0 };
     char label[16];
     sessionLabel(s, label, sizeof(label));
 
     canvas.setTextColor(col, COL_BG);
     canvas.setTextDatum(middle_left);
-    canvas.drawString(glyph, CX - 88, y);
+    if (waiting) {                                   // needs-you: a hot filled triangle
+      canvas.fillTriangle(CX - 90, y - 5, CX - 90, y + 5, CX - 82, y, col);
+    } else {                                         // working: spinner · idle: a dot
+      char glyph[2] = { working ? SPINNER[spinFrame] : '.', 0 };
+      canvas.drawString(glyph, CX - 88, y);
+    }
     canvas.drawString(label, CX - 70, y);
   }
 
@@ -796,7 +801,7 @@ static void drawSessionList() {
   if (waits > 0) {
     canvas.setTextDatum(middle_center);
     char ft[20]; snprintf(ft, sizeof(ft), "%d waiting", waits);
-    canvas.setTextColor(COL_INK, COL_BG);   // match the white "needs you" rows
+    canvas.setTextColor(COL_HOT, COL_BG);   // match the hot "needs you" rows
     canvas.drawString(ft, CX, 206);
   }
 
@@ -982,20 +987,80 @@ static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "
 static const int MENU_N   = 7;
 static const int MENU_GAP = 26;   // row pitch; tightened so 7 entries clear the title
 
+// Draw a monospace string centred on cx with `extra` px between glyphs — the
+// wide-tracking "readout" look for the clock and uppercase labels. Font + colour
+// are set by the caller.
+static void drawTracked(const char* s, int cx, int y, int extra) {
+  int n = strlen(s);
+  if (n == 0) return;
+  int cw = canvas.textWidth("0");            // monospace: every glyph is this wide
+  int total = n * cw + (n - 1) * extra;
+  int x = cx - total / 2;
+  canvas.setTextDatum(middle_left);
+  for (int i = 0; i < n; i++) {
+    char ch[2] = { s[i], 0 };
+    canvas.drawString(ch, x, y);
+    x += cw + extra;
+  }
+}
+
+// Tiny settings-menu glyphs, all drawn from primitives (line/circle/arc/triangle)
+// so they cost nothing on-device. Centred on (x, y), ~11px, in colour `col`.
+static void drawMenuIcon(int k, int x, int y, uint32_t col) {
+  switch (k) {
+    case 0:  // monitor — a stacked list
+      for (int i = -1; i <= 1; i++) canvas.drawLine(x - 5, y + i * 4, x + 5, y + i * 4, col);
+      break;
+    case 1:  // brightness — a sun
+      canvas.drawCircle(x, y, 3, col);
+      for (int a = 0; a < 360; a += 90) {
+        float r = a * DEG_TO_RAD;
+        canvas.drawLine(x + 5 * cosf(r), y + 5 * sinf(r), x + 7 * cosf(r), y + 7 * sinf(r), col);
+      }
+      break;
+    case 2:  // sound — a speaker + wave
+      canvas.fillTriangle(x - 1, y - 5, x - 1, y + 5, x + 4, y, col);
+      canvas.fillRect(x - 5, y - 2, 4, 5, col);
+      canvas.drawArc(x + 4, y, 4, 5, -45, 45, col);
+      break;
+    case 3:  // clock — a face with hands
+      canvas.drawCircle(x, y, 5, col);
+      canvas.drawLine(x, y, x, y - 3, col);
+      canvas.drawLine(x, y, x + 2, y + 1, col);
+      break;
+    case 4:  // connection — a signal dot with arcs
+      canvas.fillCircle(x, y, 2, col);
+      canvas.drawArc(x, y, 5, 6, 40, 140, col);
+      canvas.drawArc(x, y, 5, 6, 220, 320, col);
+      break;
+    case 5:  // firmware — an up chevron on a stem
+      canvas.drawLine(x - 4, y + 2, x, y - 4, col);
+      canvas.drawLine(x, y - 4, x + 4, y + 2, col);
+      canvas.drawLine(x, y - 4, x, y + 5, col);
+      break;
+    case 6:  // reset — a refresh arc with an arrowhead
+      canvas.drawArc(x, y, 4, 5, 300, 200, col);
+      canvas.drawLine(x + 4, y - 3, x + 7, y - 2, col);
+      canvas.drawLine(x + 5, y + 1, x + 7, y - 2, col);
+      break;
+  }
+}
+
 static void drawModeMenu() {
   drawBase();
-  canvas.setTextDatum(middle_center);
   canvas.setFont(&fonts::FreeMono9pt7b);
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("settings", CX, 26);
+  drawTracked("SETTINGS", CX, 24, 2);
 
   for (int i = 0; i < MENU_N; i++) {
     bool sel = (i == menuChoice);
     int  y   = CY - (MENU_N - 1) * (MENU_GAP / 2) + i * MENU_GAP;   // vertically centered
-    char row[24];
-    snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", menuLabels[i]);
-    canvas.setTextColor(sel ? COL_AMBER : COL_GRAY, COL_BG);
-    canvas.drawString(row, CX, y);
+    if (sel) canvas.fillRoundRect(CX - 76, y - 11, 152, 22, 6, COL_AMBER);  // TUI highlight bar
+    uint32_t fg = sel ? COL_BG : COL_GRAY;
+    drawMenuIcon(i, CX - 58, y, fg);
+    canvas.setTextColor(fg, sel ? COL_AMBER : COL_BG);   // opaque text over the pill
+    canvas.setTextDatum(middle_left);
+    canvas.drawString(menuLabels[i], CX - 42, y);
   }
   canvas.pushSprite(0, 0);
 }
@@ -1119,22 +1184,38 @@ static void drawConnection() {
 
 // A dedicated clock face (date + a minute marker on the rim), distinct from the
 // idle-monitor screen which shows "waiting for claude".
+// Sakamoto's algorithm: day of week (0 = Sunday) from a Gregorian date. The RTC's
+// own weekday field isn't reliably set by the bridge, so we derive it.
+static int dayOfWeek(int y, int m, int d) {
+  static const int t[] = { 0, 3, 2, 5, 0, 3, 5, 1, 4, 6, 2, 4 };
+  if (m < 3) y -= 1;
+  return (y + y / 4 - y / 100 + y / 400 + t[m - 1] + d) % 7;
+}
+
 static void drawClock() {
   drawBase();
-  char tBuf[12], dBuf[20];
-  getTimeStr(tBuf, dBuf);
+  auto dt = M5Dial.Rtc.getDateTime();
 
-  canvas.setTextDatum(middle_center);
+  // Terminal readout: HH:MM:SS with live seconds and wide tracking.
+  char tBuf[12];
+  snprintf(tBuf, sizeof(tBuf), "%02d:%02d:%02d", dt.time.hours, dt.time.minutes, dt.time.seconds);
   canvas.setFont(&fonts::FreeMonoBold18pt7b);
   canvas.setTextColor(COL_AMBER, COL_BG);
-  canvas.drawString(tBuf, CX, CY - 6);
+  drawTracked(tBuf, CX, CY - 8, 1);
 
+  // Uppercase date: "WED 02 JUL 2026".
+  static const char* WD[7]  = { "SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT" };
+  static const char* MO[12] = { "JAN", "FEB", "MAR", "APR", "MAY", "JUN",
+                                "JUL", "AUG", "SEP", "OCT", "NOV", "DEC" };
+  int mo = (dt.date.month >= 1 && dt.date.month <= 12) ? dt.date.month : 1;
+  int wd = dayOfWeek(dt.date.year, mo, dt.date.date);
+  char dBuf[20];
+  snprintf(dBuf, sizeof(dBuf), "%s %02d %s %04d", WD[wd], dt.date.date, MO[mo - 1], dt.date.year);
   canvas.setFont(&fonts::FreeMono9pt7b);
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString(dBuf, CX, CY + 30);
+  drawTracked(dBuf, CX, CY + 30, 1);
 
   // A ring of dots filling clockwise with the minutes of the hour.
-  auto dt = M5Dial.Rtc.getDateTime();
   drawDotRing(dt.time.minutes / 60.0f, COL_AMBER, COL_ARC_OFF, 60, CR - 8);
   canvas.pushSprite(0, 0);
 }
@@ -1682,8 +1763,11 @@ void loop() {
   // Periodic redraws: idle clock (10s), permission countdown arc (1s), and the
   // roster spinner (~150ms, only while a session is "working").
   static unsigned long lastSlow = 0, lastFast = 0;
-  if ((appState == IDLE || appState == CLOCK) && millis() - lastSlow > 10000) {
+  if (appState == IDLE && millis() - lastSlow > 10000) {
     lastSlow = millis(); needsRedraw = true;
+  }
+  if (appState == CLOCK && millis() - lastFast > 1000) {   // tick the seconds readout
+    lastFast = millis(); needsRedraw = true;
   }
   if (appState == PERMISSION && millis() - lastFast > 1000) {
     lastFast = millis(); needsRedraw = true;

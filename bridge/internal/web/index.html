@@ -10,7 +10,7 @@
 <style>
   :root{
     --page:#0b0a08; --ink:#e9e2d6; --dim:#8a8175; --grey:#6f695f;
-    --amber:#FFA62B; --amber-hot:#FFC46B; --red:#FF5B34;
+    --amber:#FFB000; --hot:#FF7A18; --amber-hot:#FFC46B; --red:#FF5B34;
   }
   *{box-sizing:border-box; margin:0; padding:0;}
   html,body{height:100%;}
@@ -44,9 +44,9 @@
   .row .st{font-size:11.5px;}
   .row.sel{color:var(--ink);} .row.sel .car{opacity:1;}
   .row.work{color:var(--amber); text-shadow:0 0 7px rgba(255,166,43,.4);}
-  .row.wait{color:#F4EFE3; text-shadow:0 0 11px rgba(244,239,227,.6); animation:pulse 1.15s ease-in-out infinite;}
+  .row.wait{color:var(--hot); text-shadow:0 0 11px rgba(255,122,24,.6); animation:pulse 1.15s ease-in-out infinite;}
   .ft{display:flex; justify-content:space-between; font-size:11px; color:var(--dim); padding-top:11px;}
-  .ft .w{color:#F4EFE3;}
+  .ft .w{color:var(--hot);}
   @keyframes pulse{0%,100%{opacity:.6;} 50%{opacity:1;}}
 
   /* permission */
