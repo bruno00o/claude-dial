@@ -231,14 +231,24 @@ func (d *Device) Update(snap protocol.Snapshot) {
 // leaving the Dial frozen on a stale view.
 func (d *Device) writer() {
 	fails := 0
+	var lastReset time.Time
 	for snap := range d.pending {
 		if d.flush(snap) {
 			fails = 0
 			continue
 		}
+		// One reconnect can clear a link whose TX buffer wedged mid-session. But
+		// if a *fresh* connection also fails to write (a born-dead link — the
+		// macOS BLE stack itself is wedged), reconnecting in a tight loop only
+		// churns it further. So rate-limit forced reconnects: try one, then back
+		// off and keep failing quietly (the daemon still works — golden rule)
+		// until the link recovers or the device is power-cycled.
 		if fails++; fails >= 2 {
-			d.logf("BLE writes wedged; forcing a reconnect")
-			d.resetLink()
+			if time.Since(lastReset) > 45*time.Second {
+				d.logf("BLE writes wedged; forcing a reconnect")
+				d.resetLink()
+				lastReset = time.Now()
+			}
 			fails = 0
 		}
 	}
