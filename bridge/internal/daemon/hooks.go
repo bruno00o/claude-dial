@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/bruno00o/claude-dial/bridge/internal/protocol"
@@ -79,13 +81,17 @@ func (d *Daemon) handleHook(w http.ResponseWriter, r *http.Request) {
 // MessageDisplay. The idle_prompt Notification and the Stop hook both settle
 // the session back to "idle".
 func (d *Daemon) handleEvent(w http.ResponseWriter, in hookInput) {
-	project := filepath.Base(in.Cwd)
+	project := projectName(in.Cwd)
 	switch in.HookEventName {
 	case "SessionStart", "Stop", "Notification":
 		// Notification is installed with the idle_prompt matcher only.
 		d.store.Touch(in.SessionID, project, protocol.StateIdle)
-	case "UserPromptSubmit", "PostToolUse", "PostToolUseFailure", "MessageDisplay":
+	case "UserPromptSubmit", "PostToolUse", "PostToolUseFailure":
+		// A tool finishing / a new turn resolves any pending permission.
 		d.store.Touch(in.SessionID, project, protocol.StateWorking)
+	case "MessageDisplay":
+		// Weak liveness: must not un-block a session waiting on a permission.
+		d.store.TouchLiveness(in.SessionID, project)
 	case "PreToolUse": // monitor-mode notifier: a tool is starting right now
 		d.store.Upsert(in.SessionID, project, protocol.StateWorking,
 			in.ToolName, extractCommand(in.ToolInput))
@@ -106,7 +112,7 @@ func (d *Daemon) handleEvent(w http.ResponseWriter, in hookInput) {
 // wait for the user's answer, falling back to the terminal prompt if the dial
 // isn't there or doesn't respond in time.
 func (d *Daemon) handlePreToolUse(w http.ResponseWriter, r *http.Request, in hookInput) {
-	project := filepath.Base(in.Cwd)
+	project := projectName(in.Cwd)
 	command := extractCommand(in.ToolInput)
 	d.store.Upsert(in.SessionID, project, protocol.StatePermission, in.ToolName, command)
 	d.broadcast()
@@ -159,6 +165,52 @@ func mapDecision(dec string) (permission, reason, state string) {
 	default: // ask / unknown
 		return "ask", "", protocol.StateWorking
 	}
+}
+
+// projectMarkers name a project root, checked most-specific first. Covers the
+// common ecosystems so the label is stable without relying on git alone.
+var projectMarkers = []string{".git", "go.mod", "package.json", "Cargo.toml", "pyproject.toml", ".hg", ".svn"}
+
+var (
+	projMu    sync.Mutex
+	projCache = map[string]string{}
+)
+
+// projectName derives a stable, human label for a session from its cwd (the
+// basename of the nearest ancestor that looks like a project root), memoized by
+// cwd. The marker walk stats the filesystem and runs on the dense liveness
+// hooks, but a cwd's root never changes within a run, so each is resolved once.
+func projectName(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	projMu.Lock()
+	defer projMu.Unlock()
+	if n, ok := projCache[cwd]; ok {
+		return n
+	}
+	n := resolveProject(cwd)
+	projCache[cwd] = n
+	return n
+}
+
+// resolveProject returns the basename of the nearest ancestor of cwd holding a
+// project marker (.git, go.mod, …), or cwd's own basename if none is found — so
+// the name stays steady as a session moves between subdirectories (bridge, src).
+func resolveProject(cwd string) string {
+	for dir := cwd; ; {
+		for _, m := range projectMarkers {
+			if _, err := os.Stat(filepath.Join(dir, m)); err == nil {
+				return filepath.Base(dir)
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return filepath.Base(cwd)
 }
 
 // extractCommand pulls a human-readable command out of a tool's input.
