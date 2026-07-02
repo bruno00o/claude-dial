@@ -49,21 +49,21 @@
 
 // ── Colour palette ── amber phosphor "terminal" theme (matches the simulator) ──
 // Physical object is orange/grey/black: amber-orange = active, grey = idle,
-// black = background. Colours are plain RGB888 (0xRRGGBB): LovyanGFX reads an
-// integer colour argument as 888 and converts it to the panel's native RGB565,
-// handling byte order. (An earlier build hand-packed 565 and passed it raw —
-// LovyanGFX still read those bytes as 888, so amber came out green and the
-// background blue. Feed it 888 and let the library convert.)
-#define COL_BG          0x0A0805   // warm near-black
-#define COL_INK         0xE9E2D6   // selected row / command text
-#define COL_DIM         0x8A8175   // headers, footers, hints
-#define COL_GRAY        0x6F695F   // idle rows
-#define COL_AMBER       0xFFB000   // working / primary accent (A+C)
-#define COL_HOT         0xFF7A18   // needs-you / urgent — the 2nd temperature
-#define COL_AMBER_HOT   0xFFC46B   // soft warning / usage mid-range
-#define COL_RED         0xFF5B34   // reject
-#define COL_RING        0x2A2318   // dim bezel ring
-#define COL_ARC_OFF     0x140F08   // spent countdown-arc dots
+// black = background. Colours are RGB888 (0xRRGGBB) but MUST be typed uint32_t:
+// LovyanGFX picks the colour format from the ARGUMENT TYPE — uint32_t → RGB888,
+// but a bare hex literal is int32_t, which it reads as RGB565 (colortype.hpp
+// convert_to_rgb888). A plain `0xFFB000` therefore came out violet, not amber.
+// The (uint32_t) cast forces the 888 path. Verified on-device (colour bug hunt).
+#define COL_BG          ((uint32_t)0x0A0805)   // warm near-black
+#define COL_INK         ((uint32_t)0xE9E2D6)   // selected row / command text
+#define COL_DIM         ((uint32_t)0x8A8175)   // headers, footers, hints
+#define COL_GRAY        ((uint32_t)0x6F695F)   // idle rows
+#define COL_AMBER       ((uint32_t)0xFFB000)   // working / primary accent (A+C)
+#define COL_HOT         ((uint32_t)0xFF7A18)   // needs-you / urgent — the 2nd temperature
+#define COL_AMBER_HOT   ((uint32_t)0xFFC46B)   // soft warning / usage mid-range
+#define COL_RED         ((uint32_t)0xFF5B34)   // reject
+#define COL_RING        ((uint32_t)0x2A2318)   // dim bezel ring
+#define COL_ARC_OFF     ((uint32_t)0x140F08)   // spent countdown-arc dots
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
