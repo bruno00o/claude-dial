@@ -114,6 +114,10 @@ static Session sessions[MAX_SESSIONS];
 static int     sessionCount = 0;
 
 // Permission FIFO
+// PERM_TIMEOUT_MS matches the daemon's default --timeout (90s). If the two
+// drift apart the Dial keeps showing a prompt the host has already abandoned
+// (or vice-versa); either way an unanswered permission falls back to "ask".
+static const unsigned long PERM_TIMEOUT_MS = 90000UL;
 static char  permQueue[MAX_SESSIONS][40];
 static int   permQueueCount = 0;
 static char  currentPermSid[40] = "";     // "" = nothing shown
@@ -237,7 +241,7 @@ static void permShowNext() {
         strcmp(sessions[idx].state, "permission_request") == 0) {
       strlcpy(currentPermSid, sid, 40);
       permChoice  = 0;
-      permTimeout = millis() + 120000UL;
+      permTimeout = millis() + PERM_TIMEOUT_MS;
       appState    = PERMISSION;
       needsRedraw = true;
       return;
@@ -488,7 +492,7 @@ static void drawPermission() {
   // countdown arc around the rim (subtle ambient timer)
   long remaining = permTimeout - millis();
   if (remaining < 0) remaining = 0;
-  int arcR = 114, arcSteps = (int)((remaining / 120000.0f) * 180);
+  int arcR = 114, arcSteps = (int)(((float)remaining / PERM_TIMEOUT_MS) * 180);
   for (int i = 0; i < 180; i++) {
     float a = (i / 180.0f) * 360.0f - 90.0f;
     int ax = CX + (int)(arcR * cosf(a * DEG_TO_RAD));
