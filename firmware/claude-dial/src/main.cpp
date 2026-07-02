@@ -66,7 +66,7 @@
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION };
+enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION, RESET_CONFIRM };
 
 struct Session {
   char  session_id[40];
@@ -978,8 +978,9 @@ static void drawConfirming() {
   canvas.pushSprite(0, 0);
 }
 
-static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "connection", "firmware" };
-static const int MENU_N = 6;
+static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "connection", "firmware", "reset" };
+static const int MENU_N   = 7;
+static const int MENU_GAP = 26;   // row pitch; tightened so 7 entries clear the title
 
 static void drawModeMenu() {
   drawBase();
@@ -990,10 +991,48 @@ static void drawModeMenu() {
 
   for (int i = 0; i < MENU_N; i++) {
     bool sel = (i == menuChoice);
-    int  y   = CY - (MENU_N - 1) * 15 + i * 30;   // centered, 30px apart
+    int  y   = CY - (MENU_N - 1) * (MENU_GAP / 2) + i * MENU_GAP;   // vertically centered
     char row[24];
     snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", menuLabels[i]);
     canvas.setTextColor(sel ? COL_AMBER : COL_GRAY, COL_BG);
+    canvas.drawString(row, CX, y);
+  }
+  canvas.pushSprite(0, 0);
+}
+
+// Factory reset: wipe persisted settings (the NVS "cdial" namespace) and reboot.
+// It's the only in-field recovery once the Dial is unplugged, so it lives in the
+// menu — but behind a two-option confirm defaulting to "cancel", so no single
+// press can ever trigger it.
+static int resetChoice = 0;   // 0 = cancel (default), 1 = reset
+
+static void doFactoryReset() {
+  prefs.clear();              // clears the whole namespace (bright, vol) -> defaults
+  delay(60);                  // let the flash write settle before the reboot
+  ESP.restart();
+}
+
+static void drawReset() {
+  drawBase();
+  canvas.setTextDatum(middle_center);
+
+  canvas.setFont(&fonts::FreeMonoBold12pt7b);
+  canvas.setTextColor(COL_RED, COL_BG);
+  canvas.drawString("factory reset", CX, 66);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("wipes settings,", CX, 94);
+  canvas.drawString("then restarts", CX, 112);
+
+  const char* opts[2] = { "cancel", "reset" };
+  for (int i = 0; i < 2; i++) {
+    bool sel = (i == resetChoice);
+    int  y   = 150 + i * 30;
+    char row[20];
+    snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", opts[i]);
+    uint32_t col = sel ? (i == 1 ? COL_RED : COL_AMBER) : COL_GRAY;
+    canvas.setTextColor(col, COL_BG);
     canvas.drawString(row, CX, y);
   }
   canvas.pushSprite(0, 0);
@@ -1111,6 +1150,7 @@ static void redraw() {
     case BRIGHTNESS:   drawBrightness();  break;
     case SOUND:        drawSound();       break;
     case CONNECTION:   drawConnection();  break;
+    case RESET_CONFIRM: drawReset();      break;
     case CLOCK:        drawClock();       break;
     case OTA:          drawOtaProgress(); break;
     case OTA_PROMPT:   drawOtaPrompt();   break;
@@ -1220,7 +1260,7 @@ static void handleEncoder(int delta) {
   // something, and not on SOUND — which previews the real volume level instead.
   switch (appState) {
     case SESSION_LIST: case PERMISSION: case MODE_MENU:
-    case OTA_PROMPT:   case BRIGHTNESS:
+    case OTA_PROMPT:   case BRIGHTNESS:  case RESET_CONFIRM:
       playEarcon(delta > 0 ? SND_TICK_CW : SND_TICK_CCW);
       break;
     default: break;
@@ -1249,6 +1289,10 @@ static void handleEncoder(int delta) {
       break;
     case MODE_MENU:
       menuChoice = (menuChoice + (delta > 0 ? 1 : -1) + MENU_N) % MENU_N;
+      needsRedraw = true;
+      break;
+    case RESET_CONFIRM:
+      resetChoice ^= 1;                       // toggle cancel <-> reset
       needsRedraw = true;
       break;
     case BRIGHTNESS: {
@@ -1325,7 +1369,17 @@ static void handlePress() {
         case 3: appState = CLOCK;         break;
         case 4: appState = CONNECTION;    break;
         case 5: appState = FIRMWARE_INFO; break;
+        case 6: appState = RESET_CONFIRM; resetChoice = 0; break;  // default to cancel
       }
+      needsRedraw = true;
+      break;
+
+    case RESET_CONFIRM:
+      if (resetChoice == 1) {               // confirmed → wipe and reboot (no return)
+        playEarcon(SND_REJECT);
+        doFactoryReset();
+      }
+      appState = MODE_MENU; menuChoice = 6; // cancel → back to the menu
       needsRedraw = true;
       break;
 
@@ -1382,9 +1436,9 @@ static void handleTouch(int x, int y) {
       break;
 
     case MODE_MENU: {
-      if (y < 38) break;                               // title zone
-      int base = CY - (MENU_N - 1) * 15;               // first entry's y
-      int c = (y - base + 15) / 30;                    // 30px rows, nearest
+      if (y < 34) break;                               // title zone
+      int base = CY - (MENU_N - 1) * (MENU_GAP / 2);   // first entry's y
+      int c = (y - base + MENU_GAP / 2) / MENU_GAP;    // nearest row
       if (c < 0) c = 0;
       if (c >= MENU_N) c = MENU_N - 1;
       menuChoice = c;
@@ -1396,6 +1450,12 @@ static void handleTouch(int x, int y) {
     case OTA_PROMPT:
       if (otaStarting || y < 118) break;               // options at 130 / 156
       otaPromptChoice = (y < 143) ? 0 : 1;
+      needsRedraw = true;
+      handlePress();
+      break;
+
+    case RESET_CONFIRM:
+      resetChoice = (y < 165) ? 0 : 1;                 // rows at 150 / 180
       needsRedraw = true;
       handlePress();
       break;
@@ -1549,7 +1609,7 @@ void loop() {
     hostName[0]    = 0;
     usagePct       = 0;
     if (appState != MODE_MENU && appState != BRIGHTNESS && appState != SOUND &&
-        appState != CONNECTION && appState != CLOCK)
+        appState != CONNECTION && appState != CLOCK && appState != RESET_CONFIRM)
       appState = homeView();   // sessions cleared → clock, unless a settings screen is up
     needsRedraw = true;
   }
