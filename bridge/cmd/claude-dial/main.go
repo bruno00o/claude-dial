@@ -16,6 +16,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/bruno00o/claude-dial/bridge/internal/ble"
@@ -89,7 +90,7 @@ func cmdServe(args []string) {
 		}
 	}
 
-	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, Debug: *debug})
+	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), Debug: *debug})
 
 	mux := http.NewServeMux()
 	hub.RegisterRoutes(mux)
@@ -172,6 +173,17 @@ func defaultPort() int {
 		}
 	}
 	return 8787
+}
+
+// rulesPath is where per-session "always allow" grants are persisted. An error
+// resolving the user config dir yields "" — the daemon then keeps grants in
+// memory only, which is fine (always-allow is a convenience, never a gate).
+func rulesPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "claude-dial", "always-allow.json")
 }
 
 func check(err error) {

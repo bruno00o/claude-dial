@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/bruno00o/claude-dial/bridge/internal/protocol"
+	"github.com/bruno00o/claude-dial/bridge/internal/rules"
 	"github.com/bruno00o/claude-dial/bridge/internal/session"
 )
 
@@ -29,6 +30,7 @@ type Daemon struct {
 	debug   bool
 
 	router *router
+	rules  *rules.Store
 }
 
 // Config tunes the daemon.
@@ -54,6 +56,9 @@ type Config struct {
 	// ForgetAfter drops a session entirely after this much silence (terminal
 	// closed without a SessionEnd, machine slept, …).
 	ForgetAfter time.Duration
+	// RulesPath is the JSON file backing per-session "always allow" grants.
+	// Empty keeps them in memory only (lost on restart).
+	RulesPath string
 	// Debug logs every hook event received.
 	Debug bool
 }
@@ -78,6 +83,7 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 		timeout: cfg.Timeout,
 		debug:   cfg.Debug,
 		router:  newRouter(),
+		rules:   rules.Load(cfg.RulesPath),
 	}
 	go d.dispatch()
 	go d.sweep(cfg.IdleAfter, cfg.BlockedIdleAfter, cfg.ForgetAfter)

@@ -107,6 +107,7 @@ func (d *Daemon) handleEvent(w http.ResponseWriter, in hookInput) {
 			in.ToolName, extractCommand(in.ToolInput))
 	case "SessionEnd":
 		d.store.Remove(in.SessionID)
+		d.rules.Forget(in.SessionID) // per-session grants die with the session
 	default:
 		writeEmpty(w)
 		return
@@ -121,6 +122,16 @@ func (d *Daemon) handleEvent(w http.ResponseWriter, in hookInput) {
 func (d *Daemon) handlePreToolUse(w http.ResponseWriter, r *http.Request, in hookInput) {
 	project := projectName(in.Cwd)
 	command := extractCommand(in.ToolInput)
+
+	// Already always-allowed for this session? Approve silently — no dial, no
+	// wait — and show the tool as running.
+	if d.rules.Allowed(in.SessionID, in.ToolName, command) {
+		d.store.Upsert(in.SessionID, project, protocol.StateWorking, in.ToolName, command)
+		d.broadcast()
+		writeDecision(w, "allow", "always-allowed via claude-dial")
+		return
+	}
+
 	d.store.Upsert(in.SessionID, project, protocol.StatePermission, in.ToolName, command)
 	d.broadcast()
 
@@ -137,6 +148,10 @@ func (d *Daemon) handlePreToolUse(w http.ResponseWriter, r *http.Request, in hoo
 
 	select {
 	case dec := <-ch:
+		if dec.Decision == protocol.DecisionAlwaysAllow {
+			// Remember this exact call so it won't prompt again this session.
+			d.rules.Allow(in.SessionID, in.ToolName, command)
+		}
 		perm, reason, state := mapDecision(dec.Decision)
 		d.store.SetState(in.SessionID, state)
 		d.broadcast()
@@ -165,7 +180,8 @@ func mapDecision(dec string) (permission, reason, state string) {
 	case protocol.DecisionAllowOnce:
 		return "allow", "Approved once via claude-dial", protocol.StateWorking
 	case protocol.DecisionAlwaysAllow:
-		// TODO: persist a permission rule so future matching calls auto-allow.
+		// The grant itself is persisted by the caller (handlePreToolUse), which
+		// has the session/tool/command; here we just allow this call through.
 		return "allow", "Always-allow via claude-dial", protocol.StateWorking
 	case protocol.DecisionReject:
 		return "deny", "Rejected via claude-dial", protocol.StateIdle
