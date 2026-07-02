@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.6.0](https://github.com/bruno00o/claude-dial/compare/v0.5.0...v0.6.0) (2026-07-02)
+
+
+### Features
+
+* **ota:** firmware BLE OTA service + dual-OTA partitions (phase 2a) ([5d1f9f6](https://github.com/bruno00o/claude-dial/commit/5d1f9f6955e6888f8eb9764424096f225080f0a7))
+* **ota:** host-side BLE OTA client + `firmware update` (phase 2a) ([5eb6607](https://github.com/bruno00o/claude-dial/commit/5eb66076b16421f481121f9cc08bf1d266857644))
+* **ota:** tactile "update available" prompt on the Dial (phase 2b) ([423a021](https://github.com/bruno00o/claude-dial/commit/423a021a5fe166e138f635447d87ffb018234ed7))
+
 ## [0.5.0](https://github.com/bruno00o/claude-dial/compare/v0.4.0...v0.5.0) (2026-07-02)
 
 
