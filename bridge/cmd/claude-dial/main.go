@@ -103,7 +103,7 @@ func cmdServe(args []string) {
 		}
 	}
 
-	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), Debug: *debug})
+	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), BridgeVersion: version, Debug: *debug})
 
 	mux := http.NewServeMux()
 	hub.RegisterRoutes(mux)
@@ -260,9 +260,11 @@ func firmwareStatus(port int) {
 	defer resp.Body.Close()
 	var s struct {
 		Firmware struct {
-			Running         string `json:"running"`
-			Latest          string `json:"latest"`
-			UpdateAvailable bool   `json:"update_available"`
+			Running               string `json:"running"`
+			Latest                string `json:"latest"`
+			Bridge                string `json:"bridge"`
+			UpdateAvailable       bool   `json:"update_available"`
+			UpdateBlockedByBridge bool   `json:"update_blocked_by_bridge"`
 		} `json:"firmware"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
@@ -276,6 +278,8 @@ func firmwareStatus(port int) {
 		fmt.Println("dial: not connected (no firmware version reported)")
 	case fw.UpdateAvailable:
 		fmt.Printf("dial %s — update available: %s (run: claude-dial firmware update)\n", fw.Running, fw.Latest)
+	case fw.UpdateBlockedByBridge:
+		fmt.Printf("dial %s — firmware %s is available but needs a newer bridge (this bridge is %s).\n  run: brew upgrade claude-dial\n", fw.Running, fw.Latest, fw.Bridge)
 	case fw.Latest == "":
 		fmt.Printf("dial %s — latest version unknown (no manifest published yet)\n", fw.Running)
 	default:

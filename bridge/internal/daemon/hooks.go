@@ -170,17 +170,32 @@ func (d *Daemon) handlePreToolUse(w http.ResponseWriter, r *http.Request, in hoo
 	}
 }
 
+// bridgeCanFlash reports whether the bridge is new enough to drive the given
+// firmware version. The bridge is the OTA driver and must never be older than
+// the image it flashes (that firmware could expect messages this bridge doesn't
+// send yet), so we only offer/flash firmware up to the bridge's own version. An
+// empty bridge version (gate disabled) or empty firmware version is permissive.
+func (d *Daemon) bridgeCanFlash(fwVersion string) bool {
+	if d.bridgeVersion == "" || fwVersion == "" {
+		return true
+	}
+	return !firmware.Newer(d.bridgeVersion, fwVersion) // fwVersion <= bridgeVersion
+}
+
 func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	running := d.dev.FirmwareVersion()
 	latest := d.fw.Latest().Version
+	newer := firmware.Newer(running, latest)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"connected": d.dev.Connected(),
 		"sessions":  d.store.Snapshot(),
 		"firmware": map[string]any{
-			"running":          running,
-			"latest":           latest,
-			"update_available": firmware.Newer(running, latest),
+			"running":                  running,
+			"latest":                   latest,
+			"bridge":                   d.bridgeVersion,
+			"update_available":         newer && d.bridgeCanFlash(latest),
+			"update_blocked_by_bridge": newer && !d.bridgeCanFlash(latest),
 		},
 	})
 }
@@ -229,6 +244,12 @@ func (d *Daemon) runFirmwareUpdate(ctx context.Context, force bool, onLine func(
 	if latest.Version == "" {
 		return errors.New("no firmware manifest available yet")
 	}
+	// Never flash newer than the bridge — not even with --force, since that's
+	// exactly the skew we're preventing. Upgrade the bridge first.
+	if !d.bridgeCanFlash(latest.Version) {
+		return fmt.Errorf("firmware %s needs a newer bridge (this bridge is %s) — run `brew upgrade claude-dial` first",
+			latest.Version, orUnknown(d.bridgeVersion))
+	}
 	running := d.dev.FirmwareVersion()
 	if !force && !firmware.Newer(running, latest.Version) {
 		onLine(fmt.Sprintf("already up to date (dial %s, latest %s)", orUnknown(running), latest.Version))
@@ -263,9 +284,11 @@ func (d *Daemon) advertiseUpdate() {
 		return
 	}
 	latest := d.fw.Latest().Version
-	if firmware.Newer(d.dev.FirmwareVersion(), latest) {
+	if firmware.Newer(d.dev.FirmwareVersion(), latest) && d.bridgeCanFlash(latest) {
 		fl.SetUpdateAvailable(latest)
 	} else {
+		// Either up to date, or the bridge is too old to drive it — don't dangle
+		// a tactile prompt the bridge would refuse. `firmware status` explains it.
 		fl.SetUpdateAvailable("")
 	}
 }

@@ -52,6 +52,11 @@ type Daemon struct {
 	rules   *rules.Store
 	fw      *firmware.Checker
 	otaBusy atomic.Bool // guards against concurrent firmware flashes
+
+	// bridgeVersion is this binary's own version. The bridge drives the OTA, so
+	// it must never flash firmware newer than itself (that firmware could expect
+	// messages this bridge doesn't send yet); we only offer/flash up to it.
+	bridgeVersion string
 }
 
 // Config tunes the daemon.
@@ -83,6 +88,9 @@ type Config struct {
 	// FirmwareManifestURL overrides where the latest-firmware manifest is fetched
 	// from. Empty uses firmware.DefaultManifestURL (the GitHub latest release).
 	FirmwareManifestURL string
+	// BridgeVersion is this binary's version, used to gate firmware OTA so the
+	// bridge never flashes an image newer than itself. Empty disables the gate.
+	BridgeVersion string
 	// Debug logs every hook event received.
 	Debug bool
 }
@@ -102,13 +110,14 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 		cfg.ForgetAfter = time.Hour
 	}
 	d := &Daemon{
-		store:   store,
-		dev:     dev,
-		timeout: cfg.Timeout,
-		debug:   cfg.Debug,
-		router:  newRouter(),
-		rules:   rules.Load(cfg.RulesPath),
-		fw:      firmware.NewChecker(cfg.FirmwareManifestURL),
+		store:         store,
+		dev:           dev,
+		timeout:       cfg.Timeout,
+		debug:         cfg.Debug,
+		router:        newRouter(),
+		rules:         rules.Load(cfg.RulesPath),
+		fw:            firmware.NewChecker(cfg.FirmwareManifestURL),
+		bridgeVersion: cfg.BridgeVersion,
 	}
 	go d.dispatch()
 	go d.sweep(cfg.IdleAfter, cfg.BlockedIdleAfter, cfg.ForgetAfter)
