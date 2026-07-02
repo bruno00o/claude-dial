@@ -598,6 +598,22 @@ static void drawBase() {
   canvas.drawCircle(CX, CY, CR - 1, COL_RING);   // dim bezel only — no CRT gloss
 }
 
+// The recurring "dial" motif: a ring of small dots around the rim. The first
+// `frac` (0..1) of them, clockwise from 12 o'clock, are drawn in `on`, the rest
+// in `off`. Shared by the idle bezel, the clock, and the countdown arcs — and
+// the vehicle for the future usage gauge (light the ring by quota consumed).
+static void drawDotRing(float frac, uint32_t on, uint32_t off, int count, int radius) {
+  if (frac < 0) frac = 0;
+  if (frac > 1) frac = 1;
+  int lit = (int)(frac * count + 0.5f);
+  for (int i = 0; i < count; i++) {
+    float a = (i / (float)count) * 360.0f - 90.0f;
+    int ax = CX + (int)(radius * cosf(a * DEG_TO_RAD));
+    int ay = CY + (int)(radius * sinf(a * DEG_TO_RAD));
+    canvas.fillCircle(ax, ay, 1, (i < lit) ? on : off);
+  }
+}
+
 static void getTimeStr(char* tBuf, char* dBuf) {
   auto dt = M5Dial.Rtc.getDateTime();
   snprintf(tBuf, 12, "%02d:%02d", dt.time.hours, dt.time.minutes);
@@ -606,6 +622,7 @@ static void getTimeStr(char* tBuf, char* dBuf) {
 
 static void drawIdle() {
   drawBase();
+  drawDotRing(0.0f, COL_AMBER, COL_ARC_OFF, 60, CR - 8);   // ambient dial bezel
   char tBuf[12], dBuf[20];
   getTimeStr(tBuf, dBuf);
 
@@ -1030,11 +1047,9 @@ static void drawClock() {
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString(dBuf, CX, CY + 30);
 
+  // A ring of dots filling clockwise with the minutes of the hour.
   auto dt = M5Dial.Rtc.getDateTime();
-  float angle = (dt.time.minutes / 60.0f) * 360.0f - 90.0f;
-  int ax = CX + (int)((CR - 6) * cosf(angle * DEG_TO_RAD));
-  int ay = CY + (int)((CR - 6) * sinf(angle * DEG_TO_RAD));
-  canvas.fillCircle(ax, ay, 4, COL_AMBER);
+  drawDotRing(dt.time.minutes / 60.0f, COL_AMBER, COL_ARC_OFF, 60, CR - 8);
   canvas.pushSprite(0, 0);
 }
 
