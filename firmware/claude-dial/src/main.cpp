@@ -151,6 +151,11 @@ static int   permQueueCount = 0;
 static char  currentPermSid[40] = "";     // "" = nothing shown
 static long  permTimeout = 0;
 static int   permChoice = 0;              // 0 allow once | 1 always | 2 reject
+// Long-command reader (P2): tap the command to read it full-screen, encoder
+// scrolls. permCmdOverflow is set each render so touch knows there's more to see.
+static bool  permCmdView     = false;
+static int   permCmdScroll    = 0;
+static bool  permCmdOverflow = false;
 
 static int   menuChoice = 0;
 static long  lastEncoderPos = 0;
@@ -291,10 +296,12 @@ static void permShowNext() {
     if (idx >= 0 && sessions[idx].active &&
         strcmp(sessions[idx].state, "permission_request") == 0) {
       strlcpy(currentPermSid, sid, 40);
-      permChoice  = 0;
-      permTimeout = millis() + PERM_TIMEOUT_MS;
-      appState    = PERMISSION;
-      needsRedraw = true;
+      permChoice    = 0;
+      permCmdView   = false;
+      permCmdScroll = 0;
+      permTimeout   = millis() + PERM_TIMEOUT_MS;
+      appState      = PERMISSION;
+      needsRedraw   = true;
       return;
     }
     // stale entry, skip
@@ -661,6 +668,43 @@ static void drawSessionList() {
 
 static const char* choiceLabels[3] = { "allow once", "always allow", "reject" };
 
+// isDangerous flags commands worth a second look (P5): destructive, privilege-
+// escalating, or pipe-to-shell. A curated, low-false-positive list — "> /dev/
+// null" is fine, "of=/dev/" and "> /dev/sd" are not; curl/wget only count when
+// piped into a shell. Just drives the red styling; it never changes the choice.
+static bool isDangerous(const char* cmd) {
+  char c[220];
+  strlcpy(c, cmd, sizeof(c));
+  for (char* p = c; *p; p++) *p = tolower((unsigned char)*p);
+  static const char* pats[] = {
+    "rm -rf", "rm -fr", "rm -r ", "sudo ", "chmod 777", "mkfs", "dd if=",
+    ":(){", "of=/dev/", "> /dev/sd", "git push --force", "push -f", "eval ",
+  };
+  for (unsigned i = 0; i < sizeof(pats) / sizeof(pats[0]); i++)
+    if (strstr(c, pats[i])) return true;
+  bool pipeSh = strstr(c, "| sh") || strstr(c, "|sh") ||
+                strstr(c, "| bash") || strstr(c, "|bash");
+  return (strstr(c, "curl") || strstr(c, "wget")) && pipeSh;
+}
+
+// wrapAll breaks s into out[][22] at the given width, preferring space breaks
+// and hard-cutting a word with no space in the window. Returns the line count
+// (capped at maxLines). 14 lines at width 19 covers the full command buffer.
+static int wrapAll(const char* s, char out[][22], int maxLines, int width) {
+  int n = 0, len = (int)strlen(s), pos = 0;
+  while (pos < len && n < maxLines) {
+    int remain = len - pos;
+    if (remain <= width) { strlcpy(out[n++], s + pos, remain + 1); break; }
+    int cut = width;
+    while (cut > 0 && s[pos + cut] != ' ') cut--;
+    if (cut <= 0) cut = width;                  // no space in window → hard cut
+    strlcpy(out[n++], s + pos, cut + 1);
+    pos += cut;
+    while (pos < len && s[pos] == ' ') pos++;   // swallow the break space(s)
+  }
+  return n;
+}
+
 static void drawPermission() {
   int idx = findSession(currentPermSid);
   if (idx < 0 || !sessions[idx].active) { permShowNext(); return; }
@@ -669,55 +713,82 @@ static void drawPermission() {
   drawBase();
   canvas.setFont(&fonts::FreeMono9pt7b);
 
-  // countdown arc around the rim (subtle ambient timer)
+  // Compose "$ tool command", wrap it fully, and flag risky commands (P5).
+  bool danger = isDangerous(s.command);
+  uint32_t cmdCol = danger ? COL_RED : COL_INK;
+  char full[248];
+  char tool[40]; strlcpy(tool, s.tool_name, sizeof(tool));
+  for (char* p = tool; *p; p++) *p = tolower(*p);
+  snprintf(full, sizeof(full), "$ %s %s", tool, s.command);
+  char lines[14][22];
+  int total = wrapAll(full, lines, 14, 19);
+  permCmdOverflow = (total > 3);
+
+  // countdown arc around the rim (ambient timer) — red when the command is risky
   long remaining = permTimeout - millis();
   if (remaining < 0) remaining = 0;
   int arcR = 114, arcSteps = (int)(((float)remaining / PERM_TIMEOUT_MS) * 180);
+  uint32_t arcCol = danger ? COL_RED : COL_AMBER;
   for (int i = 0; i < 180; i++) {
     float a = (i / 180.0f) * 360.0f - 90.0f;
     int ax = CX + (int)(arcR * cosf(a * DEG_TO_RAD));
     int ay = CY + (int)(arcR * sinf(a * DEG_TO_RAD));
-    canvas.fillCircle(ax, ay, 1, (i < arcSteps) ? COL_AMBER : COL_ARC_OFF);
+    canvas.fillCircle(ax, ay, 1, (i < arcSteps) ? arcCol : COL_ARC_OFF);
   }
 
+  // ── P2: full-screen command reader — scroll the whole command with the encoder
+  if (permCmdView) {
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(danger ? COL_RED : COL_DIM, COL_BG);
+    canvas.drawString(danger ? "! command" : "command", CX, 34);
+
+    const int visible = 6, top = 62, lh = 20;
+    if (permCmdScroll > total - visible) permCmdScroll = total - visible;
+    if (permCmdScroll < 0) permCmdScroll = 0;
+    canvas.setTextDatum(middle_left);
+    canvas.setTextColor(cmdCol, COL_BG);
+    for (int r = 0; r < visible && (permCmdScroll + r) < total; r++)
+      canvas.drawString(lines[permCmdScroll + r], 22, top + r * lh);
+
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    if (total > visible) {
+      char sc[16]; snprintf(sc, sizeof(sc), "%d/%d", permCmdScroll + 1, total - visible + 1);
+      canvas.drawString(sc, CX, 196);
+    }
+    canvas.drawString("press: back", CX, 216);
+    canvas.pushSprite(0, 0);
+    return;
+  }
+
+  // ── choices view ──
   // project (who) + queue badge
   char who[16]; sessionLabel(s, who, sizeof(who));
   canvas.setTextDatum(middle_left);
   canvas.setTextColor(COL_AMBER, COL_BG);
-  canvas.drawString(who, CX - 86, 38);
+  canvas.drawString(who, CX - 86, 34);
   canvas.setTextDatum(middle_right);
   canvas.setTextColor(COL_DIM, COL_BG);
   if (permQueueCount > 0) {
     char more[14]; snprintf(more, sizeof(more), "<%d more>", permQueueCount);
-    canvas.drawString(more, CX + 86, 38);
+    canvas.drawString(more, CX + 86, 34);
   } else {
-    canvas.drawString("last", CX + 86, 38);
+    canvas.drawString("last", CX + 86, 34);
   }
 
-  // eyebrow
+  // eyebrow — warns when risky
   canvas.setTextDatum(middle_center);
-  canvas.setTextColor(COL_AMBER_HOT, COL_BG);
-  canvas.drawString("permission", CX, 62);
+  canvas.setTextColor(danger ? COL_RED : COL_AMBER_HOT, COL_BG);
+  canvas.drawString(danger ? "! caution" : "permission", CX, 58);
 
-  // "$ tool command" wrapped to two lines
-  char full[240];
-  char tool[40]; strlcpy(tool, s.tool_name, sizeof(tool));
-  for (char* p = tool; *p; p++) *p = tolower(*p);
-  snprintf(full, sizeof(full), "$ %s %s", tool, s.command);
-  const int wrap = 19;
-  char line1[24] = {0}, line2[24] = {0};
-  if ((int)strlen(full) <= wrap) {
-    strlcpy(line1, full, sizeof(line1));
-  } else {
-    int cut = wrap;
-    while (cut > 0 && full[cut] != ' ') cut--;
-    if (cut == 0) cut = wrap;
-    strlcpy(line1, full, cut + 1);
-    strlcpy(line2, full + cut + 1, sizeof(line2));
+  // up to 3 command lines; when it overflows show 2 + a "tap to read" hint
+  int shown = permCmdOverflow ? 2 : total;
+  canvas.setTextColor(cmdCol, COL_BG);
+  for (int r = 0; r < shown; r++) canvas.drawString(lines[r], CX, 84 + r * 18);
+  if (permCmdOverflow) {
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("... tap to read", CX, 84 + 2 * 18);
   }
-  canvas.setTextColor(COL_INK, COL_BG);
-  canvas.drawString(line1, CX, 90);
-  if (line2[0]) canvas.drawString(line2, CX, 108);
 
   // choices — mono-aligned, caret ">" on the selected one
   int btnY[3] = { 150, 176, 202 };
@@ -952,7 +1023,12 @@ static void handleEncoder(int delta) {
       needsRedraw = true;
       break;
     case PERMISSION:
-      permChoice = (permChoice + (delta > 0 ? 1 : -1) + 3) % 3;
+      if (permCmdView) {                        // reader: scroll the command (clamped in draw)
+        permCmdScroll += (delta > 0) ? 1 : -1;
+        if (permCmdScroll < 0) permCmdScroll = 0;
+      } else {
+        permChoice = (permChoice + (delta > 0 ? 1 : -1) + 3) % 3;
+      }
       needsRedraw = true;
       break;
     case OTA_PROMPT:
@@ -988,6 +1064,7 @@ static void handlePress() {
       break;
 
     case PERMISSION: {
+      if (permCmdView) { permCmdView = false; permCmdScroll = 0; needsRedraw = true; break; }
       int idx = findSession(currentPermSid);
       if (idx < 0 || !sessions[idx].active) { permShowNext(); break; }
       // Don't send yet — open the grace window. currentPermSid stays set so we
@@ -1058,7 +1135,13 @@ static void handleTouch(int x, int y) {
   (void)x;   // vertical lists: Y alone picks the row (X reserved for future swipes)
   switch (appState) {
     case PERMISSION:
-      if (y < 138) break;                              // taps on the command area do nothing
+      if (permCmdView) {                               // reading → any tap closes the reader
+        permCmdView = false; permCmdScroll = 0; needsRedraw = true; break;
+      }
+      if (y < 138) {                                   // tap the command → read it in full (if there's more)
+        if (permCmdOverflow) { permCmdView = true; permCmdScroll = 0; needsRedraw = true; }
+        break;
+      }
       permChoice = (y < 164) ? 0 : (y < 190) ? 1 : 2;  // rows at 150 / 176 / 202
       needsRedraw = true;
       handlePress();
