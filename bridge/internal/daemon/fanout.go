@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"errors"
+
 	"github.com/bruno00o/claude-dial/bridge/internal/protocol"
 )
 
@@ -59,4 +61,23 @@ func (f *fanout) FirmwareVersion() string {
 		}
 	}
 	return ""
+}
+
+// OTACapable / Flash delegate to the first OTA-capable device (the BLE Dial).
+func (f *fanout) OTACapable() bool {
+	for _, d := range f.devices {
+		if fl, ok := d.(Flasher); ok && fl.OTACapable() {
+			return true
+		}
+	}
+	return false
+}
+
+func (f *fanout) Flash(image []byte, onProgress func(pct int)) error {
+	for _, d := range f.devices {
+		if fl, ok := d.(Flasher); ok && fl.OTACapable() {
+			return fl.Flash(image, onProgress)
+		}
+	}
+	return errors.New("no OTA-capable device connected")
 }

@@ -11,6 +11,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -69,6 +70,7 @@ func usage() {
   service uninstall  remove the launchd agent (use --write)
   service status    show whether the agent is loaded
   firmware status   show the Dial's firmware version and whether an update exists
+  firmware update   flash the latest firmware to the Dial over BLE
   status            query a running daemon
   version
 `)
@@ -228,15 +230,29 @@ func cmdStatus(args []string) {
 }
 
 func cmdFirmware(args []string) {
-	if len(args) == 0 || args[0] != "status" {
-		fmt.Fprintln(os.Stderr, "firmware: expected status")
+	if len(args) == 0 {
+		fmt.Fprintln(os.Stderr, "firmware: expected status|update")
 		os.Exit(2)
 	}
-	fs := flag.NewFlagSet("firmware status", flag.ExitOnError)
+	sub := args[0]
+	fs := flag.NewFlagSet("firmware "+sub, flag.ExitOnError)
 	port := fs.Int("port", defaultPort(), "daemon port")
+	force := fs.Bool("force", false, "flash even if the Dial is already up to date")
 	_ = fs.Parse(args[1:])
 
-	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/status", *port))
+	switch sub {
+	case "status":
+		firmwareStatus(*port)
+	case "update":
+		firmwareUpdate(*port, *force)
+	default:
+		fmt.Fprintf(os.Stderr, "firmware: unknown subcommand %q\n", sub)
+		os.Exit(2)
+	}
+}
+
+func firmwareStatus(port int) {
+	resp, err := http.Get(fmt.Sprintf("http://localhost:%d/status", port))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon not reachable:", err)
 		os.Exit(1)
@@ -259,11 +275,42 @@ func cmdFirmware(args []string) {
 	case fw.Running == "":
 		fmt.Println("dial: not connected (no firmware version reported)")
 	case fw.UpdateAvailable:
-		fmt.Printf("dial %s — update available: %s\n", fw.Running, fw.Latest)
+		fmt.Printf("dial %s — update available: %s (run: claude-dial firmware update)\n", fw.Running, fw.Latest)
 	case fw.Latest == "":
 		fmt.Printf("dial %s — latest version unknown (no manifest published yet)\n", fw.Running)
 	default:
 		fmt.Printf("dial %s — up to date\n", fw.Running)
+	}
+}
+
+func firmwareUpdate(port int, force bool) {
+	url := fmt.Sprintf("http://localhost:%d/firmware/update", port)
+	if force {
+		url += "?force=1"
+	}
+	resp, err := http.Post(url, "text/plain", nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "daemon not reachable:", err)
+		os.Exit(1)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		fmt.Fprintln(os.Stderr, "cannot update:", strings.TrimSpace(string(body)))
+		os.Exit(1)
+	}
+	// Stream progress lines as the daemon flashes; fail if any reports an error.
+	failed := false
+	sc := bufio.NewScanner(resp.Body)
+	for sc.Scan() {
+		text := sc.Text()
+		fmt.Println(text)
+		if strings.HasPrefix(text, "error:") {
+			failed = true
+		}
+	}
+	if failed {
+		os.Exit(1)
 	}
 }
 

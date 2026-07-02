@@ -10,7 +10,10 @@ package firmware
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -101,6 +104,39 @@ func (c *Checker) Run(ctx context.Context, interval time.Duration) {
 type httpError struct{ code int }
 
 func (e *httpError) Error() string { return "firmware manifest: HTTP " + strconv.Itoa(e.code) }
+
+// DownloadLatest fetches the latest firmware image and verifies its sha256
+// against the manifest. Returns the image bytes and the manifest it came from.
+func (c *Checker) DownloadLatest(ctx context.Context) ([]byte, Manifest, error) {
+	m := c.Latest()
+	if m.URL == "" {
+		return nil, m, fmt.Errorf("no firmware manifest available")
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.URL, nil)
+	if err != nil {
+		return nil, m, err
+	}
+	client := &http.Client{Timeout: 2 * time.Minute} // images are ~1 MB over BLE-less HTTP
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, m, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, m, &httpError{resp.StatusCode}
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // 16 MB cap
+	if err != nil {
+		return nil, m, err
+	}
+	if m.SHA256 != "" {
+		sum := sha256.Sum256(data)
+		if got := hex.EncodeToString(sum[:]); got != m.SHA256 {
+			return nil, m, fmt.Errorf("firmware sha256 mismatch: manifest %s, got %s", m.SHA256, got)
+		}
+	}
+	return data, m, nil
+}
 
 // Newer reports whether available is a strictly newer version than running.
 // Both are dotted numeric versions ("0.4.0"), optionally "v"-prefixed. If either

@@ -20,6 +20,7 @@ import (
 
 	"tinygo.org/x/bluetooth"
 
+	"github.com/bruno00o/claude-dial/bridge/internal/ota"
 	"github.com/bruno00o/claude-dial/bridge/internal/protocol"
 )
 
@@ -34,6 +35,11 @@ const (
 	rxUUID  = "12345678-1234-1234-1234-123456789abd" // host -> device (write)
 	txUUID  = "12345678-1234-1234-1234-123456789abe" // device -> host (notify)
 
+	// OTA characteristics (see firmware): control (JSON), data (raw), status (notify).
+	otaCtrlUUID   = "12345678-1234-1234-1234-123456789ac0"
+	otaDataUUID   = "12345678-1234-1234-1234-123456789ac1"
+	otaStatusUUID = "12345678-1234-1234-1234-123456789ac2"
+
 	// Keep a single session message inside a typical negotiated BLE MTU so it
 	// arrives in one write. Commands are already truncated upstream; this is a
 	// harder ceiling for the wire.
@@ -44,20 +50,26 @@ const (
 
 // Device is the BLE transport to the Dial.
 type Device struct {
-	service, rx, tx bluetooth.UUID
-	debug           bool
+	service, rx, tx              bluetooth.UUID
+	otaCtrlU, otaDataU, otaStatU bluetooth.UUID
+	debug                        bool
 
-	mu        sync.Mutex
-	rxChar    bluetooth.DeviceCharacteristic
-	hasRX     bool
-	connected bool
-	conn      bluetooth.Device // current connection, for forcing a reconnect
-	hasConn   bool
-	firmware  string // version the Dial announced on connect ("" until it does)
-	last      map[string]protocol.SessionView
+	mu         sync.Mutex
+	rxChar     bluetooth.DeviceCharacteristic
+	hasRX      bool
+	connected  bool
+	conn       bluetooth.Device // current connection, for forcing a reconnect
+	hasConn    bool
+	firmware   string // version the Dial announced on connect ("" until it does)
+	otaCapable bool   // firmware advertised OTA support in its hello
+	otaCtrl    bluetooth.DeviceCharacteristic
+	otaData    bluetooth.DeviceCharacteristic
+	hasOTA     bool // all OTA characteristics were discovered
+	last       map[string]protocol.SessionView
 
 	pending   chan protocol.Snapshot // coalescing hand-off to the writer goroutine
 	decisions chan protocol.Decision
+	otaStatus chan ota.Status // parsed ota_status notifications
 }
 
 // New starts the BLE device. It returns immediately: enabling the adapter
@@ -77,14 +89,30 @@ func New(debug bool) (*Device, error) {
 	if err != nil {
 		return nil, err
 	}
+	otaCtrl, err := bluetooth.ParseUUID(otaCtrlUUID)
+	if err != nil {
+		return nil, err
+	}
+	otaData, err := bluetooth.ParseUUID(otaDataUUID)
+	if err != nil {
+		return nil, err
+	}
+	otaStat, err := bluetooth.ParseUUID(otaStatusUUID)
+	if err != nil {
+		return nil, err
+	}
 	d := &Device{
 		service:   svc,
 		rx:        rx,
 		tx:        tx,
+		otaCtrlU:  otaCtrl,
+		otaDataU:  otaData,
+		otaStatU:  otaStat,
 		debug:     debug,
 		last:      map[string]protocol.SessionView{},
 		pending:   make(chan protocol.Snapshot, 1),
 		decisions: make(chan protocol.Decision, 32),
+		otaStatus: make(chan ota.Status, 16),
 	}
 	go d.run()
 	go d.writer()
@@ -171,13 +199,15 @@ func (d *Device) setup(device bluetooth.Device) error {
 	if len(svcs) == 0 {
 		return errNoService
 	}
-	chars, err := svcs[0].DiscoverCharacteristics([]bluetooth.UUID{d.rx, d.tx})
+	chars, err := svcs[0].DiscoverCharacteristics(
+		[]bluetooth.UUID{d.rx, d.tx, d.otaCtrlU, d.otaDataU, d.otaStatU})
 	if err != nil {
 		return err
 	}
 
 	d.mu.Lock()
 	d.hasRX = false
+	var gotCtrl, gotData, gotStat bool
 	d.last = map[string]protocol.SessionView{} // force a full resend after (re)connect
 	for _, c := range chars {
 		switch c.UUID() {
@@ -188,8 +218,18 @@ func (d *Device) setup(device bluetooth.Device) error {
 			if err := c.EnableNotifications(d.onNotify); err != nil {
 				d.logf("subscribe TX: %v", err)
 			}
+		case d.otaCtrlU:
+			d.otaCtrl, gotCtrl = c, true
+		case d.otaDataU:
+			d.otaData, gotData = c, true
+		case d.otaStatU:
+			gotStat = true
+			if err := c.EnableNotifications(d.onOtaStatus); err != nil {
+				d.logf("subscribe OTA status: %v", err)
+			}
 		}
 	}
+	d.hasOTA = gotCtrl && gotData && gotStat
 	ok := d.hasRX
 	d.mu.Unlock()
 
@@ -206,8 +246,9 @@ func (d *Device) onNotify(buf []byte) {
 	if json.Unmarshal(buf, &hello) == nil && hello.Type == "hello" {
 		d.mu.Lock()
 		d.firmware = hello.Firmware
+		d.otaCapable = hello.OTA
 		d.mu.Unlock()
-		d.logf("dial firmware %s", hello.Firmware)
+		d.logf("dial firmware %s (ota=%v)", hello.Firmware, hello.OTA)
 		return
 	}
 	var dec protocol.Decision
@@ -226,6 +267,75 @@ func (d *Device) FirmwareVersion() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.firmware
+}
+
+// onOtaStatus parses an ota_status notification and forwards it to the flasher.
+func (d *Device) onOtaStatus(buf []byte) {
+	var s ota.Status
+	if json.Unmarshal(buf, &s) != nil || s.State == "" {
+		return
+	}
+	select {
+	case d.otaStatus <- s:
+	default: // flasher is slow / not running: drop (it re-reads terminal states)
+	}
+}
+
+// OTACapable reports whether a connected Dial can take a BLE firmware update.
+func (d *Device) OTACapable() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.connected && d.hasOTA
+}
+
+// Flash streams a firmware image to the Dial (see internal/ota). It blocks until
+// the Dial verifies and reboots, or an error/timeout occurs.
+func (d *Device) Flash(image []byte, onProgress func(pct int)) error {
+	if !d.OTACapable() {
+		return errors.New("dial not connected or not OTA-capable")
+	}
+	return ota.Flash(d, image, onProgress)
+}
+
+// WriteControl, WriteData, Status and MTU implement ota.Transport. Writes use
+// Write (with response) for the same reason as the session writer: macOS
+// WriteWithoutResponse is unreliable, and the ATT ack gives natural back-pressure.
+func (d *Device) WriteControl(b []byte) error {
+	d.mu.Lock()
+	c, ok := d.otaCtrl, d.hasOTA
+	d.mu.Unlock()
+	if !ok {
+		return errors.New("ota control characteristic unavailable")
+	}
+	_, err := c.Write(b)
+	return err
+}
+
+func (d *Device) WriteData(b []byte) error {
+	d.mu.Lock()
+	c, ok := d.otaData, d.hasOTA
+	d.mu.Unlock()
+	if !ok {
+		return errors.New("ota data characteristic unavailable")
+	}
+	_, err := c.Write(b)
+	return err
+}
+
+func (d *Device) Status() <-chan ota.Status { return d.otaStatus }
+
+// MTU returns the negotiated ATT MTU so the flasher can size chunks; it falls
+// back to the 23-byte BLE minimum if the platform can't report it.
+func (d *Device) MTU() int {
+	d.mu.Lock()
+	c, ok := d.otaData, d.hasOTA
+	d.mu.Unlock()
+	if ok {
+		if m, err := c.GetMTU(); err == nil && m >= 23 {
+			return int(m)
+		}
+	}
+	return 23
 }
 
 // Update hands the latest snapshot to the writer goroutine. Implements
@@ -409,7 +519,9 @@ func (d *Device) setConnected(v bool) {
 	d.connected = v
 	if !v {
 		d.hasRX = false
+		d.hasOTA = false
 		d.firmware = ""
+		d.otaCapable = false
 		d.last = map[string]protocol.SessionView{}
 	}
 	d.mu.Unlock()

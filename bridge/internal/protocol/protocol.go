@@ -76,4 +76,5 @@ type Decision struct {
 type DeviceHello struct {
 	Type     string `json:"type"`
 	Firmware string `json:"fw"`
+	OTA      bool   `json:"ota"` // firmware accepts BLE OTA updates
 }

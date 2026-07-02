@@ -27,6 +27,13 @@ type Device interface {
 	FirmwareVersion() string
 }
 
+// Flasher is an optional Device capability: pushing a firmware image over the
+// transport. Only the BLE Dial implements it; the daemon type-asserts for it.
+type Flasher interface {
+	OTACapable() bool
+	Flash(image []byte, onProgress func(pct int)) error
+}
+
 // Daemon wires the session store to a device.
 type Daemon struct {
 	store   *session.Store

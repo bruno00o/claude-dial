@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -37,6 +38,7 @@ type hookSpecific struct {
 func (d *Daemon) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/hook", d.handleHook)
 	mux.HandleFunc("/status", d.handleStatus)
+	mux.HandleFunc("/firmware/update", d.handleFirmwareUpdate)
 }
 
 func (d *Daemon) handleHook(w http.ResponseWriter, r *http.Request) {
@@ -179,6 +181,69 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"update_available": firmware.Newer(running, latest),
 		},
 	})
+}
+
+// handleFirmwareUpdate downloads the latest firmware and flashes the connected
+// Dial over BLE, streaming plain-text progress lines. It refuses when no
+// OTA-capable Dial is connected or the Dial is already current (unless ?force).
+func (d *Daemon) handleFirmwareUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	fl, ok := d.dev.(Flasher)
+	if !ok || !fl.OTACapable() {
+		http.Error(w, "no OTA-capable Dial connected", http.StatusServiceUnavailable)
+		return
+	}
+	latest := d.fw.Latest()
+	if latest.Version == "" {
+		http.Error(w, "no firmware manifest available yet", http.StatusServiceUnavailable)
+		return
+	}
+	running := d.dev.FirmwareVersion()
+	force := r.URL.Query().Get("force") != ""
+
+	w.Header().Set("Content-Type", "text/plain")
+	flush, _ := w.(http.Flusher)
+	line := func(format string, a ...any) {
+		fmt.Fprintf(w, format+"\n", a...)
+		if flush != nil {
+			flush.Flush()
+		}
+	}
+
+	if !force && !firmware.Newer(running, latest.Version) {
+		line("already up to date (dial %s, latest %s)", orUnknown(running), latest.Version)
+		return
+	}
+
+	line("downloading firmware %s…", latest.Version)
+	image, _, err := d.fw.DownloadLatest(r.Context())
+	if err != nil {
+		line("error: download failed: %v", err)
+		return
+	}
+	line("flashing %d bytes over BLE…", len(image))
+	last := -1
+	err = fl.Flash(image, func(pct int) {
+		if pct != last && pct%10 == 0 {
+			last = pct
+			line("progress %d%%", pct)
+		}
+	})
+	if err != nil {
+		line("error: %v", err)
+		return
+	}
+	line("done — the Dial is rebooting into %s", latest.Version)
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
 }
 
 // mapDecision translates a dial answer into a Claude Code permission decision
