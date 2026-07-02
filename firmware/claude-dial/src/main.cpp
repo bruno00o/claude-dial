@@ -117,6 +117,7 @@ static bool permInQueue(const char* sid);
 static void permEnqueue(const char* sid);
 static void permRemoveFromQueue(const char* sid);
 static void permShowNext();
+static bool isDangerous(const char* cmd);
 
 static void handleRxMessage(const char* data, uint16_t len);
 
@@ -183,6 +184,7 @@ static uint8_t   soundVol = 128;
 enum Earcon {
   SND_BOOT, SND_NEEDS_YOU, SND_TICK, SND_ALLOW, SND_REJECT,
   SND_UNDO, SND_DONE, SND_OTA_DONE, SND_ERROR,
+  SND_TICK_CW, SND_TICK_CCW,   // per-detent encoder ticks, pitched by direction
 };
 
 static void playEarcon(Earcon e) {
@@ -199,6 +201,8 @@ static void playEarcon(Earcon e) {
     case SND_OTA_DONE:  spk.tone(1047, 60); delay(70); spk.tone(1319, 60); delay(70);
                         spk.tone(1568, 60); delay(70); spk.tone(2093, 140); break;    // C-E-G-C jingle
     case SND_ERROR:     spk.tone(400, 90);   delay(100); spk.tone(300, 130);  break;  // soft low blip
+    case SND_TICK_CW:   spk.tone(4500, 10);                                    break;  // detent, one way…
+    case SND_TICK_CCW:  spk.tone(3500, 10);                                    break;  // …lower pitch the other
   }
 }
 
@@ -239,6 +243,17 @@ static QueueHandle_t         rxQueue = nullptr;
 // ── Display sprite ───────────────────────────────────────────────────────────
 static M5Canvas canvas(&M5Dial.Display);
 static const int CX = 120, CY = 120, CR = 120;
+
+// A quick colour circle grows from the center to full screen — a physical "look
+// here" wipe when a permission takes over. ~8 frames, no easing library.
+static void wipeIn(uint32_t color) {
+  for (int r = 8; r <= CR; r += 15) {
+    canvas.fillScreen(COL_BG);
+    canvas.fillCircle(CX, CY, r, color);
+    canvas.pushSprite(0, 0);
+    delay(9);
+  }
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Session helpers
@@ -321,6 +336,7 @@ static void permRemoveFromQueue(const char* sid) {
 
 // Pop the next valid pending request and show it. If none, leave the screen.
 static void permShowNext() {
+  AppState prev = appState;   // to wipe only on a real takeover, not between queued prompts
   currentPermSid[0] = 0;
   while (permQueueCount > 0) {
     char sid[40];
@@ -337,6 +353,10 @@ static void permShowNext() {
       permCmdView   = false;
       permCmdScroll = 0;
       permTimeout   = millis() + PERM_TIMEOUT_MS;
+      // Wipe in only when the prompt actually takes over the screen (from the
+      // roster/clock), not when flipping between queued prompts. Red if risky.
+      if (prev != PERMISSION && prev != CONFIRMING)
+        wipeIn(isDangerous(sessions[idx].command) ? COL_RED : COL_AMBER);
       appState      = PERMISSION;
       needsRedraw   = true;
       return;
@@ -613,6 +633,15 @@ static void drawIdle() {
   canvas.pushSprite(0, 0);
 }
 
+// Scale an RGB565 colour toward black by num/den — for the round-screen edge
+// fade (M5's trick: rows dim with distance from center, reading as a CRT
+// vignette that happens to suit the terminal look).
+static uint32_t dim565(uint32_t c, int num, int den) {
+  int r = (c >> 11) & 0x1F, g = (c >> 5) & 0x3F, b = c & 0x1F;
+  r = r * num / den; g = g * num / den; b = b * num / den;
+  return (uint32_t)((r << 11) | (g << 5) | b);
+}
+
 // Roster priority, mirroring the daemon's prioritize(): needs-you → working →
 // idle. The daemon already sorts the snapshot, but the Dial re-buckets sessions
 // into its own slots by id, so it re-applies the same ranking at render time.
@@ -679,6 +708,14 @@ static void drawSessionList() {
       col = RGB565(v, v, (uint8_t)(v * 0.90f));                // slightly warm white
     } else {
       col = COL_GRAY;                     // idle
+    }
+
+    // Round-screen vignette: fade rows toward the rim by distance from center —
+    // but never the needs-you rows, which must stay bright wherever they land.
+    if (!waiting) {
+      int f = 255 - abs(y - CY) * 2;
+      if (f < 150) f = 150;
+      col = dim565(col, f, 255);
     }
 
     char glyph[2] = { working ? SPINNER[spinFrame] : waiting ? '*' : '.', 0 };
@@ -1116,6 +1153,17 @@ static void drawFirmwareInfo() {
 // Input
 // ─────────────────────────────────────────────────────────────────────────────
 static void handleEncoder(int delta) {
+  // A short, direction-pitched detent tick (M5's trick: no haptic motor, so the
+  // buzzer fakes one) makes blind rotation legible. Only where the encoder moves
+  // something, and not on SOUND — which previews the real volume level instead.
+  switch (appState) {
+    case SESSION_LIST: case PERMISSION: case MODE_MENU:
+    case OTA_PROMPT:   case BRIGHTNESS:
+      playEarcon(delta > 0 ? SND_TICK_CW : SND_TICK_CCW);
+      break;
+    default: break;
+  }
+
   switch (appState) {
     case SESSION_LIST:
       listScrollOffset += (delta > 0) ? 1 : -1;
@@ -1328,12 +1376,22 @@ void setup() {
 
   prefs.begin("cdial", false);
   brightness = prefs.getUChar("bright", 180);
-  M5Dial.Display.setBrightness(brightness);
+  M5Dial.Display.setBrightness(0);   // stay dark until the boot fade-in
   soundVol = prefs.getUChar("vol", 128);
   M5Dial.Speaker.setVolume(soundVol);
 
   canvas.setColorDepth(16);          // RGB565 — set depth before allocating
   canvas.createSprite(240, 240);
+
+  // Soft boot fade-in (M5's touch): show a splash, then ramp the backlight up
+  // instead of snapping on.
+  drawBase();
+  canvas.setTextDatum(middle_center);
+  canvas.setFont(&fonts::FreeMonoBold12pt7b);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.drawString("claude-dial", CX, CY);
+  canvas.pushSprite(0, 0);
+  for (int b = 0; b <= brightness; b += 8) { M5Dial.Display.setBrightness(b); delay(12); }
 
   M5Dial.Rtc.begin();
   memset(sessions, 0, sizeof(sessions));
