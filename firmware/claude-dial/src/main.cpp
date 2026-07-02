@@ -241,6 +241,10 @@ static int           otaPromptChoice       = 0;   // 0 = install now, 1 = later
 static bool          otaStarting           = false;
 static unsigned long otaPromptStartedAt    = 0;
 static bool                  bleConnected = false;
+// True once the bridge has connected at least once since boot. Lets the idle
+// screen tell a first-run "never paired" Dial apart from a temporary drop, so it
+// can show one-time setup guidance out of the box and nothing after.
+static bool                  hasEverConnected = false;
 static QueueHandle_t         rxQueue = nullptr;
 
 // ── Display sprite ───────────────────────────────────────────────────────────
@@ -374,7 +378,7 @@ static void permShowNext() {
 // BLE callbacks  (run in the NimBLE task — keep them trivial)
 // ─────────────────────────────────────────────────────────────────────────────
 class ServerCallbacks : public NimBLEServerCallbacks {
-  void onConnect(NimBLEServer*) override    { bleConnected = true;  needsRedraw = true; }
+  void onConnect(NimBLEServer*) override    { bleConnected = true;  hasEverConnected = true; needsRedraw = true; }
   void onDisconnect(NimBLEServer*) override {
     bleConnected = false; needsRedraw = true;
     NimBLEDevice::startAdvertising();
@@ -643,6 +647,28 @@ static void drawIdle() {
   drawBase();
   // Rim gauge: fills with the 5h usage window (all-dim ambient bezel at 0%).
   drawDotRing(usagePct / 100.0f, usageColor(), COL_ARC_OFF, 60, CR - 8);
+
+  // Fresh out of the box: never paired since boot. Show how to set up the Mac
+  // bridge instead of a clock stuck on the wrong time. Disappears for good once
+  // the bridge connects the first time (see hasEverConnected).
+  if (!bleConnected && !hasEverConnected) {
+    canvas.setTextDatum(middle_center);
+    canvas.setFont(&fonts::FreeMonoBold12pt7b);
+    canvas.setTextColor(COL_AMBER, COL_BG);
+    canvas.drawString("claude-dial", CX, CY - 58);
+
+    canvas.setFont(&fonts::FreeMono9pt7b);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("not paired yet", CX, CY - 30);
+    canvas.drawString("set up on your Mac", CX, CY - 6);
+
+    canvas.setTextColor(COL_AMBER, COL_BG);
+    canvas.drawString("github.com/bruno00o/", CX, CY + 22);
+    canvas.drawString("claude-dial", CX, CY + 42);
+    canvas.pushSprite(0, 0);
+    return;
+  }
+
   char tBuf[12], dBuf[20];
   getTimeStr(tBuf, dBuf);
 
