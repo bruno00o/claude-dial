@@ -66,7 +66,7 @@
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND };
+enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION };
 
 struct Session {
   char  session_id[40];
@@ -129,6 +129,7 @@ static void drawConfirming();
 static void drawModeMenu();
 static void drawBrightness();
 static void drawSound();
+static void drawConnection();
 static void drawClock();
 static void redraw();
 static void handleEncoder(int delta);
@@ -165,6 +166,9 @@ static int   listScrollOffset = 0;
 // Name of the bridge machine we're connected to (from set_time), shown on idle
 // so you can see which computer the Dial is driving. Cleared on disconnect.
 static char  hostName[24] = "";
+// This Dial's own BLE address, set once at boot — a stable id shown on the
+// connection screen to tell multiple Dials apart.
+static char  dialId[20] = "";
 
 // Display brightness (0-255), adjustable from the menu, persisted in NVS.
 static uint8_t   brightness = 180;
@@ -873,15 +877,15 @@ static void drawConfirming() {
   canvas.pushSprite(0, 0);
 }
 
-static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "firmware" };
-static const int MENU_N = 5;
+static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "connection", "firmware" };
+static const int MENU_N = 6;
 
 static void drawModeMenu() {
   drawBase();
   canvas.setTextDatum(middle_center);
   canvas.setFont(&fonts::FreeMono9pt7b);
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("settings", CX, 34);
+  canvas.drawString("settings", CX, 26);
 
   for (int i = 0; i < MENU_N; i++) {
     bool sel = (i == menuChoice);
@@ -891,8 +895,6 @@ static void drawModeMenu() {
     canvas.setTextColor(sel ? COL_AMBER : COL_GRAY, COL_BG);
     canvas.drawString(row, CX, y);
   }
-  canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("turn / press", CX, 200);
   canvas.pushSprite(0, 0);
 }
 
@@ -945,6 +947,36 @@ static void drawSound() {
   canvas.pushSprite(0, 0);
 }
 
+// Settings > connection: link status, which machine drives us, and this Dial's
+// own BLE id (to tell several Dials apart).
+static void drawConnection() {
+  drawBase();
+  canvas.setTextDatum(middle_center);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("connection", CX, 40);
+
+  canvas.setFont(&fonts::FreeMonoBold12pt7b);
+  canvas.setTextColor(bleConnected ? COL_AMBER : COL_GRAY, COL_BG);
+  canvas.drawString(bleConnected ? "connected" : "scanning...", CX, 74);
+
+  if (bleConnected && hostName[0]) {
+    canvas.setFont(&fonts::FreeMono9pt7b);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("host", CX, 108);
+    canvas.setTextColor(COL_INK, COL_BG);
+    canvas.drawString(hostName, CX, 128);
+  }
+
+  // this Dial's id (BLE address) — dim, at the bottom
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString(dialId[0] ? dialId : "no id", CX, 196);
+
+  canvas.pushSprite(0, 0);
+}
+
 // A dedicated clock face (date + a minute marker on the rim), distinct from the
 // idle-monitor screen which shows "waiting for claude".
 static void drawClock() {
@@ -979,6 +1011,7 @@ static void redraw() {
     case MODE_MENU:    drawModeMenu();    break;
     case BRIGHTNESS:   drawBrightness();  break;
     case SOUND:        drawSound();       break;
+    case CONNECTION:   drawConnection();  break;
     case CLOCK:        drawClock();       break;
     case OTA:          drawOtaProgress(); break;
     case OTA_PROMPT:   drawOtaPrompt();   break;
@@ -1180,8 +1213,14 @@ static void handlePress() {
         case 1: appState = BRIGHTNESS;    break;
         case 2: appState = SOUND;         break;
         case 3: appState = CLOCK;         break;
-        case 4: appState = FIRMWARE_INFO; break;
+        case 4: appState = CONNECTION;    break;
+        case 5: appState = FIRMWARE_INFO; break;
       }
+      needsRedraw = true;
+      break;
+
+    case CONNECTION:                       // informational — press returns to the menu
+      appState = MODE_MENU; menuChoice = 4;
       needsRedraw = true;
       break;
 
@@ -1190,7 +1229,7 @@ static void handlePress() {
         otaPromptChoice = 0; otaStarting = false;
         appState = OTA_PROMPT;
       } else {
-        appState = MODE_MENU; menuChoice = 4;
+        appState = MODE_MENU; menuChoice = 5;
       }
       needsRedraw = true;
       break;
@@ -1233,7 +1272,7 @@ static void handleTouch(int x, int y) {
       break;
 
     case MODE_MENU: {
-      if (y < 45) break;                               // title zone
+      if (y < 38) break;                               // title zone
       int base = CY - (MENU_N - 1) * 15;               // first entry's y
       int c = (y - base + 15) / 30;                    // 30px rows, nearest
       if (c < 0) c = 0;
@@ -1252,6 +1291,7 @@ static void handleTouch(int x, int y) {
       break;
 
     case FIRMWARE_INFO:
+    case CONNECTION:
     case CONFIRMING:
       handlePress();                                   // tap anywhere = the button action
       break;
@@ -1301,6 +1341,7 @@ void setup() {
   rxQueue = xQueueCreate(8, sizeof(RxMsg));
 
   NimBLEDevice::init("Claude-Dial");
+  strlcpy(dialId, NimBLEDevice::getAddress().toString().c_str(), sizeof(dialId));
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
   NimBLEDevice::setMTU(517);   // 512-byte payloads keep OTA (~0.7 MB) to a few thousand writes
 
@@ -1386,7 +1427,8 @@ void loop() {
     permQueueCount = 0;
     currentPermSid[0] = 0;
     hostName[0]    = 0;
-    if (appState != MODE_MENU && appState != BRIGHTNESS && appState != SOUND && appState != CLOCK)
+    if (appState != MODE_MENU && appState != BRIGHTNESS && appState != SOUND &&
+        appState != CONNECTION && appState != CLOCK)
       appState = homeView();   // sessions cleared → clock, unless a settings screen is up
     needsRedraw = true;
   }
