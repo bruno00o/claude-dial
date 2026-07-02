@@ -1,0 +1,58 @@
+name: release-binaries
+
+# Build the macOS bridge binaries and attach them to the GitHub Release so the
+# Homebrew formula can download a prebuilt tarball (no Go toolchain needed on the
+# user's machine). Runs automatically when release-please publishes a release;
+# can also be dispatched manually to (re)build an existing tag.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach binaries to (e.g. v0.4.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - runner: macos-14 # Apple Silicon
+            arch: arm64
+          - runner: macos-13 # Intel
+            arch: amd64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: bridge/go.mod
+
+      # cgo is on by default on macOS; the BLE package links CoreBluetooth.
+      - name: Build
+        run: go -C bridge build -ldflags "-s -w" -o "$GITHUB_WORKSPACE/claude-dial" ./cmd/claude-dial
+
+      - name: Package
+        id: pkg
+        run: |
+          TAG="${{ github.event.inputs.tag || github.event.release.tag_name }}"
+          NAME="claude-dial_${TAG}_darwin_${{ matrix.arch }}.tar.gz"
+          tar -czf "$NAME" claude-dial LICENSE README.md
+          shasum -a 256 "$NAME" | tee "$NAME.sha256"
+          echo "tag=$TAG"   >> "$GITHUB_OUTPUT"
+          echo "name=$NAME" >> "$GITHUB_OUTPUT"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.pkg.outputs.tag }}" \
+            "${{ steps.pkg.outputs.name }}" "${{ steps.pkg.outputs.name }}.sha256" \
+            --clobber --repo "$GITHUB_REPOSITORY"
