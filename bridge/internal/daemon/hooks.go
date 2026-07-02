@@ -242,7 +242,7 @@ func (d *Daemon) runFirmwareUpdate(ctx context.Context, force bool, onLine func(
 	}
 	onLine(fmt.Sprintf("flashing %d bytes over BLE…", len(image)))
 	last := -1
-	if err := fl.Flash(image, func(pct int) {
+	if err := fl.Flash(image, latest.Version, func(pct int) {
 		if pct != last && pct%10 == 0 {
 			last = pct
 			onLine(fmt.Sprintf("progress %d%%", pct))

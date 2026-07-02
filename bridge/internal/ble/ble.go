@@ -327,11 +327,11 @@ func (d *Device) OTARequests() <-chan struct{} { return d.otaReqs }
 
 // Flash streams a firmware image to the Dial (see internal/ota). It blocks until
 // the Dial verifies and reboots, or an error/timeout occurs.
-func (d *Device) Flash(image []byte, onProgress func(pct int)) error {
+func (d *Device) Flash(image []byte, version string, onProgress func(pct int)) error {
 	if !d.OTACapable() {
 		return errors.New("dial not connected or not OTA-capable")
 	}
-	return ota.Flash(d, image, onProgress)
+	return ota.Flash(d, image, version, onProgress)
 }
 
 // WriteControl, WriteData, Status and MTU implement ota.Transport. Writes use

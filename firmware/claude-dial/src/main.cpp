@@ -66,7 +66,7 @@
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT };
+enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO };
 
 struct Session {
   char  session_id[40];
@@ -96,6 +96,7 @@ static void sendOtaStatus(const char* state, const char* msg, uint8_t pct);
 static void sendOtaConfirm();
 static void drawOtaProgress();
 static void drawOtaPrompt();
+static void drawFirmwareInfo();
 
 // Firmware version, announced to the host on connect so the bridge can flag an
 // available OTA update. CI injects the exact release version via a generated
@@ -177,10 +178,11 @@ static volatile uint32_t otaWritten  = 0;
 static AppState          otaPrevState = IDLE;    // where to return if the OTA aborts
 
 // OTA "update available" tactile prompt (phase 2b).
-static char          otaAvailVersion[16] = "";
-static int           otaPromptChoice     = 0;    // 0 = install now, 1 = later
-static bool          otaStarting         = false;
-static unsigned long otaPromptStartedAt  = 0;
+static char          otaAvailVersion[16]   = "";  // version the host offers ("" = none)
+static char          otaTargetVersion[16]  = "";  // version being installed (shown on progress)
+static int           otaPromptChoice       = 0;   // 0 = install now, 1 = later
+static bool          otaStarting           = false;
+static unsigned long otaPromptStartedAt    = 0;
 static bool                  bleConnected = false;
 static QueueHandle_t         rxQueue = nullptr;
 
@@ -463,6 +465,7 @@ class OtaCtrlCallback : public NimBLECharacteristicCallbacks {
         sendOtaStatus("error", "begin failed", 0);
         return;
       }
+      strlcpy(otaTargetVersion, doc["version"] | "", sizeof(otaTargetVersion));
       otaTotal = size; otaWritten = 0; otaFinish = false; otaActive = true;
       otaStarting = false;
       otaPrevState = (appState == OTA || appState == OTA_PROMPT) ? IDLE : appState;
@@ -716,8 +719,8 @@ static void drawConfirming() {
   canvas.pushSprite(0, 0);
 }
 
-static const char* menuLabels[] = { "monitor", "brightness", "clock" };
-static const int MENU_N = 3;
+static const char* menuLabels[] = { "monitor", "brightness", "clock", "firmware" };
+static const int MENU_N = 4;
 
 static void drawModeMenu() {
   drawBase();
@@ -797,6 +800,7 @@ static void redraw() {
     case CLOCK:        drawClock();       break;
     case OTA:          drawOtaProgress(); break;
     case OTA_PROMPT:   drawOtaPrompt();   break;
+    case FIRMWARE_INFO: drawFirmwareInfo(); break;
   }
 }
 
@@ -816,7 +820,10 @@ static void drawOtaProgress() {
   canvas.setTextDatum(middle_center);
   canvas.setFont(&fonts::FreeMono9pt7b);
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("updating firmware", CX, 92);
+  char head[24];
+  if (otaTargetVersion[0]) snprintf(head, sizeof(head), "installing %s", otaTargetVersion);
+  else                     snprintf(head, sizeof(head), "updating firmware");
+  canvas.drawString(head, CX, 92);
 
   char pctStr[8]; snprintf(pctStr, sizeof(pctStr), "%u%%", pct);
   canvas.setFont(&fonts::FreeMonoBold18pt7b);
@@ -858,6 +865,34 @@ static void drawOtaPrompt() {
     canvas.setTextColor(sel ? COL_INK : COL_GRAY, COL_BG);
     char row[24]; snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", opts[i]);
     canvas.drawString(row, CX, 130 + i * 26);
+  }
+  canvas.pushSprite(0, 0);
+}
+
+// Settings > firmware: the running version and whether an update is offered.
+static void drawFirmwareInfo() {
+  drawBase();
+  canvas.setTextDatum(middle_center);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("firmware", CX, 62);
+
+  char v[24]; snprintf(v, sizeof(v), "v%s", FW_VERSION);
+  canvas.setFont(&fonts::FreeMonoBold12pt7b);
+  canvas.setTextColor(COL_INK, COL_BG);
+  canvas.drawString(v, CX, 92);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  if (otaAvailVersion[0]) {
+    char u[28]; snprintf(u, sizeof(u), "update %s", otaAvailVersion);
+    canvas.setTextColor(COL_AMBER, COL_BG);
+    canvas.drawString(u, CX, 132);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("press to install", CX, 158);
+  } else {
+    canvas.setTextColor(COL_GRAY, COL_BG);
+    canvas.drawString("up to date", CX, 138);
   }
   canvas.pushSprite(0, 0);
 }
@@ -938,20 +973,29 @@ static void handlePress() {
         M5Dial.Speaker.tone(1600, 80);
         otaStarting = true;
         otaPromptStartedAt = millis();
-      } else {                              // later → dismiss to home
-        otaAvailVersion[0] = 0;
-        appState = homeView();
+      } else {                              // later → dismiss, but keep the offer
+        appState = homeView();              // (still reachable via settings > firmware)
       }
       needsRedraw = true;
       break;
 
     case MODE_MENU:
-      if (menuChoice == 0)                          // monitor — back to the main view
-        appState = homeView();
-      else if (menuChoice == 1)                     // brightness
-        appState = BRIGHTNESS;
-      else                                          // clock
-        appState = CLOCK;
+      switch (menuChoice) {
+        case 0: appState = homeView();    break;   // monitor — back to the main view
+        case 1: appState = BRIGHTNESS;    break;
+        case 2: appState = CLOCK;         break;
+        case 3: appState = FIRMWARE_INFO; break;
+      }
+      needsRedraw = true;
+      break;
+
+    case FIRMWARE_INFO:
+      if (otaAvailVersion[0]) {            // an update is offered → go to install/later
+        otaPromptChoice = 0; otaStarting = false;
+        appState = OTA_PROMPT;
+      } else {
+        appState = MODE_MENU; menuChoice = 3;
+      }
       needsRedraw = true;
       break;
 

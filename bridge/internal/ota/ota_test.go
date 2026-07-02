@@ -59,7 +59,7 @@ func TestFlashHappyPath(t *testing.T) {
 		image[i] = byte(i)
 	}
 	var last int
-	if err := Flash(f, image, func(p int) { last = p }); err != nil {
+	if err := Flash(f, image, "0.6.1", func(p int) { last = p }); err != nil {
 		t.Fatalf("Flash: %v", err)
 	}
 
@@ -73,12 +73,13 @@ func TestFlashHappyPath(t *testing.T) {
 		t.Errorf("final progress = %d, want 100", last)
 	}
 	var begin struct {
-		Type string `json:"type"`
-		Size int    `json:"size"`
+		Type    string `json:"type"`
+		Size    int    `json:"size"`
+		Version string `json:"version"`
 	}
 	_ = json.Unmarshal(f.control[0], &begin)
-	if begin.Type != "ota_begin" || begin.Size != 250 {
-		t.Errorf("begin = %+v, want ota_begin size 250", begin)
+	if begin.Type != "ota_begin" || begin.Size != 250 || begin.Version != "0.6.1" {
+		t.Errorf("begin = %+v, want ota_begin size 250 version 0.6.1", begin)
 	}
 	var end struct {
 		Type string `json:"type"`
@@ -94,7 +95,7 @@ func TestFlashDeviceErrorDuringStream(t *testing.T) {
 	f := newFake(103)
 	f.errorAfter = 1 // fail right after the first chunk
 
-	if err := Flash(f, make([]byte, 500), nil); err == nil {
+	if err := Flash(f, make([]byte, 500), "0.6.1", nil); err == nil {
 		t.Fatal("expected an error when the device reports a failure")
 	}
 }
@@ -103,13 +104,13 @@ func TestFlashTimesOutWithoutReady(t *testing.T) {
 	readyTimeout, doneTimeout = 50*time.Millisecond, time.Second
 	f := newFake(103)
 	f.suppressReady = true
-	if err := Flash(f, make([]byte, 10), nil); err == nil {
+	if err := Flash(f, make([]byte, 10), "0.6.1", nil); err == nil {
 		t.Fatal("expected a timeout waiting for ready")
 	}
 }
 
 func TestFlashRejectsEmptyImage(t *testing.T) {
-	if err := Flash(newFake(103), nil, nil); err == nil {
+	if err := Flash(newFake(103), nil, "0.6.1", nil); err == nil {
 		t.Fatal("expected an error for an empty image")
 	}
 }

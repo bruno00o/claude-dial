@@ -41,8 +41,9 @@ var (
 )
 
 // Flash streams image to the Dial and returns once it reports "done" (or fails).
-// onProgress, if non-nil, is called with 0..100 as bytes are acked.
-func Flash(t Transport, image []byte, onProgress func(pct int)) error {
+// version is echoed to the Dial so its progress screen can show what's being
+// installed. onProgress, if non-nil, is called with 0..100 as bytes are acked.
+func Flash(t Transport, image []byte, version string, onProgress func(pct int)) error {
 	if len(image) == 0 {
 		return fmt.Errorf("ota: empty image")
 	}
@@ -50,7 +51,7 @@ func Flash(t Transport, image []byte, onProgress func(pct int)) error {
 	// Drain any stale status from a previous attempt so waitFor sees only ours.
 	drain(t.Status())
 
-	begin, _ := json.Marshal(map[string]any{"type": "ota_begin", "size": len(image)})
+	begin, _ := json.Marshal(map[string]any{"type": "ota_begin", "size": len(image), "version": version})
 	if err := t.WriteControl(begin); err != nil {
 		return fmt.Errorf("ota: begin: %w", err)
 	}

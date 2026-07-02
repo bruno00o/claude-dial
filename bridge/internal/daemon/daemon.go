@@ -33,7 +33,7 @@ type Device interface {
 // implements it; the daemon type-asserts for it.
 type Flasher interface {
 	OTACapable() bool
-	Flash(image []byte, onProgress func(pct int)) error
+	Flash(image []byte, version string, onProgress func(pct int)) error
 	// SetUpdateAvailable drives the Dial's "update available" prompt (empty
 	// version clears it). OTARequests streams the user's install confirmations.
 	SetUpdateAvailable(version string)

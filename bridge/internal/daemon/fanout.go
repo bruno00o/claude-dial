@@ -73,10 +73,10 @@ func (f *fanout) OTACapable() bool {
 	return false
 }
 
-func (f *fanout) Flash(image []byte, onProgress func(pct int)) error {
+func (f *fanout) Flash(image []byte, version string, onProgress func(pct int)) error {
 	for _, d := range f.devices {
 		if fl, ok := d.(Flasher); ok && fl.OTACapable() {
-			return fl.Flash(image, onProgress)
+			return fl.Flash(image, version, onProgress)
 		}
 	}
 	return errors.New("no OTA-capable device connected")
