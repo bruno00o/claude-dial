@@ -110,7 +110,7 @@ static void drawFirmwareInfo();
 #  endif
 #endif
 #ifndef CLAUDE_DIAL_FW_VERSION
-#  define CLAUDE_DIAL_FW_VERSION "0.17.0"  // x-release-please-version
+#  define CLAUDE_DIAL_FW_VERSION "1.0.0"  // x-release-please-version
 #endif
 static const char* FW_VERSION = CLAUDE_DIAL_FW_VERSION;
 
