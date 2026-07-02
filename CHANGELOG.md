@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.0](https://github.com/bruno00o/claude-dial/compare/v0.7.0...v0.8.0) (2026-07-02)
+
+
+### Features
+
+* **roster:** sort sessions by priority — needs-you first, idle last ([b614715](https://github.com/bruno00o/claude-dial/commit/b6147151c4f0223a9239dbafeba81626af23ddff))
+
 ## [0.7.0](https://github.com/bruno00o/claude-dial/compare/v0.6.0...v0.7.0) (2026-07-02)
 
 
