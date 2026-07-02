@@ -58,10 +58,12 @@ type Outbound struct {
 	ToolName  string `json:"tool_name,omitempty"`
 	Command   string `json:"command,omitempty"`
 
-	// control message: {"type":"set_time","epoch":…,"tz_offset":…}
+	// control messages: {"type":"set_time","epoch":…,"tz_offset":…} and
+	// {"type":"ota_available","version":"0.6.0"} (empty version clears the prompt).
 	Type     string `json:"type,omitempty"`
 	Epoch    int64  `json:"epoch,omitempty"`
 	TZOffset int    `json:"tz_offset,omitempty"`
+	Version  string `json:"version,omitempty"`
 }
 
 // Decision is a device -> host message: the user's answer on the dial.

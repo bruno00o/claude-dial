@@ -54,22 +54,25 @@ type Device struct {
 	otaCtrlU, otaDataU, otaStatU bluetooth.UUID
 	debug                        bool
 
-	mu         sync.Mutex
-	rxChar     bluetooth.DeviceCharacteristic
-	hasRX      bool
-	connected  bool
-	conn       bluetooth.Device // current connection, for forcing a reconnect
-	hasConn    bool
-	firmware   string // version the Dial announced on connect ("" until it does)
-	otaCapable bool   // firmware advertised OTA support in its hello
-	otaCtrl    bluetooth.DeviceCharacteristic
-	otaData    bluetooth.DeviceCharacteristic
-	hasOTA     bool // all OTA characteristics were discovered
-	last       map[string]protocol.SessionView
+	mu            sync.Mutex
+	rxChar        bluetooth.DeviceCharacteristic
+	hasRX         bool
+	connected     bool
+	conn          bluetooth.Device // current connection, for forcing a reconnect
+	hasConn       bool
+	firmware      string // version the Dial announced on connect ("" until it does)
+	otaCapable    bool   // firmware advertised OTA support in its hello
+	otaCtrl       bluetooth.DeviceCharacteristic
+	otaData       bluetooth.DeviceCharacteristic
+	hasOTA        bool   // all OTA characteristics were discovered
+	otaAdvertised string // last "update available" version pushed to the Dial (dedup)
+	last          map[string]protocol.SessionView
 
+	wmu       sync.Mutex             // serializes all characteristic writes to the device
 	pending   chan protocol.Snapshot // coalescing hand-off to the writer goroutine
 	decisions chan protocol.Decision
 	otaStatus chan ota.Status // parsed ota_status notifications
+	otaReqs   chan struct{}   // user-confirmed OTA requests from the Dial
 }
 
 // New starts the BLE device. It returns immediately: enabling the adapter
@@ -113,6 +116,7 @@ func New(debug bool) (*Device, error) {
 		pending:   make(chan protocol.Snapshot, 1),
 		decisions: make(chan protocol.Decision, 32),
 		otaStatus: make(chan ota.Status, 16),
+		otaReqs:   make(chan struct{}, 1),
 	}
 	go d.run()
 	go d.writer()
@@ -239,16 +243,31 @@ func (d *Device) setup(device bluetooth.Device) error {
 	return nil
 }
 
-// onNotify handles a message coming back from the dial: either a hello (the
-// firmware version, sent on connect) or a decision (the user's dial answer).
+// onNotify handles a message coming back from the dial: a hello (firmware
+// version, on connect), an ota_confirm (the user asked to install an update on
+// the dial), or a decision (a permission answer).
 func (d *Device) onNotify(buf []byte) {
-	var hello protocol.DeviceHello
-	if json.Unmarshal(buf, &hello) == nil && hello.Type == "hello" {
-		d.mu.Lock()
-		d.firmware = hello.Firmware
-		d.otaCapable = hello.OTA
-		d.mu.Unlock()
-		d.logf("dial firmware %s (ota=%v)", hello.Firmware, hello.OTA)
+	var env struct {
+		Type string `json:"type"`
+	}
+	_ = json.Unmarshal(buf, &env)
+	switch env.Type {
+	case "hello":
+		var hello protocol.DeviceHello
+		if json.Unmarshal(buf, &hello) == nil {
+			d.mu.Lock()
+			d.firmware = hello.Firmware
+			d.otaCapable = hello.OTA
+			d.mu.Unlock()
+			d.logf("dial firmware %s (ota=%v)", hello.Firmware, hello.OTA)
+		}
+		return
+	case "ota_confirm":
+		d.logf("dial requested a firmware update")
+		select {
+		case d.otaReqs <- struct{}{}:
+		default:
+		}
 		return
 	}
 	var dec protocol.Decision
@@ -288,6 +307,24 @@ func (d *Device) OTACapable() bool {
 	return d.connected && d.hasOTA
 }
 
+// SetUpdateAvailable tells the Dial to show (version != "") or clear ("") the
+// tactile "update available" prompt. It writes only when the value changes, so
+// the daemon can call it every sweep tick without flooding the link.
+func (d *Device) SetUpdateAvailable(version string) {
+	d.mu.Lock()
+	if !d.connected || !d.hasOTA || version == d.otaAdvertised {
+		d.mu.Unlock()
+		return
+	}
+	d.otaAdvertised = version
+	d.mu.Unlock()
+	d.write(protocol.Outbound{Type: "ota_available", Version: version})
+}
+
+// OTARequests streams user-confirmed update requests coming from the Dial's
+// tactile prompt. Implements daemon.Flasher.
+func (d *Device) OTARequests() <-chan struct{} { return d.otaReqs }
+
 // Flash streams a firmware image to the Dial (see internal/ota). It blocks until
 // the Dial verifies and reboots, or an error/timeout occurs.
 func (d *Device) Flash(image []byte, onProgress func(pct int)) error {
@@ -307,7 +344,9 @@ func (d *Device) WriteControl(b []byte) error {
 	if !ok {
 		return errors.New("ota control characteristic unavailable")
 	}
+	d.wmu.Lock()
 	_, err := c.Write(b)
+	d.wmu.Unlock()
 	return err
 }
 
@@ -318,7 +357,9 @@ func (d *Device) WriteData(b []byte) error {
 	if !ok {
 		return errors.New("ota data characteristic unavailable")
 	}
+	d.wmu.Lock()
 	_, err := c.Write(b)
+	d.wmu.Unlock()
 	return err
 }
 
@@ -507,7 +548,10 @@ func (d *Device) write(msg protocol.Outbound) bool {
 	if err != nil {
 		return false
 	}
-	if _, err = rx.Write(payload); err != nil {
+	d.wmu.Lock()
+	_, err = rx.Write(payload)
+	d.wmu.Unlock()
+	if err != nil {
 		d.logf("write: %v", err)
 		return false
 	}
@@ -522,6 +566,7 @@ func (d *Device) setConnected(v bool) {
 		d.hasOTA = false
 		d.firmware = ""
 		d.otaCapable = false
+		d.otaAdvertised = ""
 		d.last = map[string]protocol.SessionView{}
 	}
 	d.mu.Unlock()

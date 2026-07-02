@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -191,52 +193,104 @@ func (d *Daemon) handleFirmwareUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	fl, ok := d.dev.(Flasher)
-	if !ok || !fl.OTACapable() {
+	if fl, ok := d.dev.(Flasher); !ok || !fl.OTACapable() {
 		http.Error(w, "no OTA-capable Dial connected", http.StatusServiceUnavailable)
 		return
 	}
-	latest := d.fw.Latest()
-	if latest.Version == "" {
-		http.Error(w, "no firmware manifest available yet", http.StatusServiceUnavailable)
-		return
-	}
-	running := d.dev.FirmwareVersion()
-	force := r.URL.Query().Get("force") != ""
 
 	w.Header().Set("Content-Type", "text/plain")
 	flush, _ := w.(http.Flusher)
-	line := func(format string, a ...any) {
-		fmt.Fprintf(w, format+"\n", a...)
+	line := func(s string) {
+		fmt.Fprintln(w, s)
 		if flush != nil {
 			flush.Flush()
 		}
 	}
+	force := r.URL.Query().Get("force") != ""
+	if err := d.runFirmwareUpdate(r.Context(), force, line); err != nil {
+		line("error: " + err.Error())
+	}
+}
 
+// runFirmwareUpdate downloads the latest firmware and flashes the Dial, emitting
+// progress via onLine. It is the shared core of the HTTP endpoint and the Dial's
+// tactile trigger, and guards against concurrent flashes.
+func (d *Daemon) runFirmwareUpdate(ctx context.Context, force bool, onLine func(string)) error {
+	if !d.otaBusy.CompareAndSwap(false, true) {
+		return errors.New("a firmware update is already in progress")
+	}
+	defer d.otaBusy.Store(false)
+
+	fl, ok := d.dev.(Flasher)
+	if !ok || !fl.OTACapable() {
+		return errors.New("no OTA-capable Dial connected")
+	}
+	latest := d.fw.Latest()
+	if latest.Version == "" {
+		return errors.New("no firmware manifest available yet")
+	}
+	running := d.dev.FirmwareVersion()
 	if !force && !firmware.Newer(running, latest.Version) {
-		line("already up to date (dial %s, latest %s)", orUnknown(running), latest.Version)
-		return
+		onLine(fmt.Sprintf("already up to date (dial %s, latest %s)", orUnknown(running), latest.Version))
+		return nil
 	}
 
-	line("downloading firmware %s…", latest.Version)
-	image, _, err := d.fw.DownloadLatest(r.Context())
+	onLine(fmt.Sprintf("downloading firmware %s…", latest.Version))
+	image, _, err := d.fw.DownloadLatest(ctx)
 	if err != nil {
-		line("error: download failed: %v", err)
-		return
+		return fmt.Errorf("download failed: %w", err)
 	}
-	line("flashing %d bytes over BLE…", len(image))
+	onLine(fmt.Sprintf("flashing %d bytes over BLE…", len(image)))
 	last := -1
-	err = fl.Flash(image, func(pct int) {
+	if err := fl.Flash(image, func(pct int) {
 		if pct != last && pct%10 == 0 {
 			last = pct
-			line("progress %d%%", pct)
+			onLine(fmt.Sprintf("progress %d%%", pct))
 		}
-	})
-	if err != nil {
-		line("error: %v", err)
+	}); err != nil {
+		return err
+	}
+	onLine(fmt.Sprintf("done — the Dial is rebooting into %s", latest.Version))
+	return nil
+}
+
+// advertiseUpdate keeps the Dial's tactile "update available" prompt in sync
+// with whether a newer firmware exists. Called every sweep tick; the device
+// dedups, so an unchanged state costs nothing.
+func (d *Daemon) advertiseUpdate() {
+	fl, ok := d.dev.(Flasher)
+	if !ok {
 		return
 	}
-	line("done — the Dial is rebooting into %s", latest.Version)
+	latest := d.fw.Latest().Version
+	if firmware.Newer(d.dev.FirmwareVersion(), latest) {
+		fl.SetUpdateAvailable(latest)
+	} else {
+		fl.SetUpdateAvailable("")
+	}
+}
+
+// consumeOTARequests runs a firmware update whenever the user confirms one on
+// the Dial. Progress shows on the Dial itself; here we just log.
+func (d *Daemon) consumeOTARequests() {
+	fl, ok := d.dev.(Flasher)
+	if !ok {
+		return
+	}
+	ch := fl.OTARequests()
+	if ch == nil {
+		return
+	}
+	for range ch {
+		log.Println("ota: update requested from the Dial")
+		if err := d.runFirmwareUpdate(context.Background(), false, func(s string) {
+			if d.debug {
+				log.Println("ota:", s)
+			}
+		}); err != nil {
+			log.Println("ota: update failed:", err)
+		}
+	}
 }
 
 func orUnknown(s string) string {

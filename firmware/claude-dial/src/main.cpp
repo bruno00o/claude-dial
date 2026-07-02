@@ -66,7 +66,7 @@
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA };
+enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT };
 
 struct Session {
   char  session_id[40];
@@ -93,7 +93,9 @@ static int  activeSessions();
 static void sendDecision(const char* sid, const char* decision);
 static void sendHello();
 static void sendOtaStatus(const char* state, const char* msg, uint8_t pct);
+static void sendOtaConfirm();
 static void drawOtaProgress();
+static void drawOtaPrompt();
 
 // Firmware version, announced to the host on connect so the bridge can flag an
 // available OTA update. CI injects the exact release version via a generated
@@ -173,6 +175,12 @@ static volatile bool     otaFinish   = false;   // ota_end received -> end()+reb
 static volatile uint32_t otaTotal    = 0;
 static volatile uint32_t otaWritten  = 0;
 static AppState          otaPrevState = IDLE;    // where to return if the OTA aborts
+
+// OTA "update available" tactile prompt (phase 2b).
+static char          otaAvailVersion[16] = "";
+static int           otaPromptChoice     = 0;    // 0 = install now, 1 = later
+static bool          otaStarting         = false;
+static unsigned long otaPromptStartedAt  = 0;
 static bool                  bleConnected = false;
 static QueueHandle_t         rxQueue = nullptr;
 
@@ -337,6 +345,23 @@ static void handleRxMessage(const char* data, uint16_t len) {
     return;
   }
 
+  // Control: the host has a newer firmware and offers a tactile install.
+  if (strcmp(type, "ota_available") == 0) {
+    const char* v = doc["version"] | "";
+    strlcpy(otaAvailVersion, v, sizeof(otaAvailVersion));
+    if (v[0]) {
+      // Don't hijack an active permission or an in-flight update.
+      if (appState != PERMISSION && appState != OTA && appState != OTA_PROMPT) {
+        otaPromptChoice = 0; otaStarting = false;
+        appState = OTA_PROMPT; needsRedraw = true;
+      }
+    } else if (appState == OTA_PROMPT) {   // update no longer offered → dismiss
+      otaStarting = false;
+      appState = homeView(); needsRedraw = true;
+    }
+    return;
+  }
+
   const char* sid   = doc["session_id"] | "";
   const char* proj  = doc["project"]    | "";
   const char* state = doc["state"]      | "";
@@ -411,6 +436,17 @@ static void sendOtaStatus(const char* state, const char* msg, uint8_t pct) {
   otaStatusChar->notify();
 }
 
+// Tell the host the user chose to install: it replies with ota_begin + the stream.
+static void sendOtaConfirm() {
+  if (!txChar || !bleConnected) return;
+  JsonDocument doc;
+  doc["type"] = "ota_confirm";
+  char buf[48];
+  size_t n = serializeJson(doc, buf, sizeof(buf));
+  txChar->setValue((uint8_t*)buf, n);
+  txChar->notify();
+}
+
 // OTA control: begin (size) opens the inactive slot, end finalizes+reboots (done
 // in loop()), abort discards. Update writes to the *inactive* partition and only
 // switches the boot slot on a verified end(), so an interrupted transfer never
@@ -428,7 +464,8 @@ class OtaCtrlCallback : public NimBLECharacteristicCallbacks {
         return;
       }
       otaTotal = size; otaWritten = 0; otaFinish = false; otaActive = true;
-      otaPrevState = (appState == OTA) ? IDLE : appState;
+      otaStarting = false;
+      otaPrevState = (appState == OTA || appState == OTA_PROMPT) ? IDLE : appState;
       appState = OTA; needsRedraw = true;
       sendOtaStatus("ready", "", 0);
     } else if (strcmp(type, "ota_end") == 0) {
@@ -759,6 +796,7 @@ static void redraw() {
     case BRIGHTNESS:   drawBrightness();  break;
     case CLOCK:        drawClock();       break;
     case OTA:          drawOtaProgress(); break;
+    case OTA_PROMPT:   drawOtaPrompt();   break;
   }
 }
 
@@ -792,6 +830,38 @@ static void drawOtaProgress() {
   canvas.pushSprite(0, 0);
 }
 
+// "Firmware X available — install now / later", chosen with the encoder.
+static void drawOtaPrompt() {
+  drawBase();
+  canvas.setTextDatum(middle_center);
+
+  canvas.setFont(&fonts::FreeMono9pt7b);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("firmware update", CX, 58);
+
+  canvas.setFont(&fonts::FreeMonoBold12pt7b);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.drawString(otaAvailVersion, CX, 88);
+
+  if (otaStarting) {
+    canvas.setFont(&fonts::FreeMono9pt7b);
+    canvas.setTextColor(COL_INK, COL_BG);
+    canvas.drawString("starting…", CX, 140);
+    canvas.pushSprite(0, 0);
+    return;
+  }
+
+  const char* opts[2] = { "install now", "later" };
+  for (int i = 0; i < 2; i++) {
+    bool sel = (otaPromptChoice == i);
+    canvas.setFont(&fonts::FreeMono9pt7b);
+    canvas.setTextColor(sel ? COL_INK : COL_GRAY, COL_BG);
+    char row[24]; snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", opts[i]);
+    canvas.drawString(row, CX, 130 + i * 26);
+  }
+  canvas.pushSprite(0, 0);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Input
 // ─────────────────────────────────────────────────────────────────────────────
@@ -805,6 +875,12 @@ static void handleEncoder(int delta) {
     case PERMISSION:
       permChoice = (permChoice + (delta > 0 ? 1 : -1) + 3) % 3;
       needsRedraw = true;
+      break;
+    case OTA_PROMPT:
+      if (!otaStarting) {
+        otaPromptChoice = (otaPromptChoice + (delta > 0 ? 1 : -1) + 2) % 2;
+        needsRedraw = true;
+      }
       break;
     case MODE_MENU:
       menuChoice = (menuChoice + (delta > 0 ? 1 : -1) + MENU_N) % MENU_N;
@@ -853,6 +929,20 @@ static void handlePress() {
 
     case CONFIRMING:
       permShowNext();
+      break;
+
+    case OTA_PROMPT:
+      if (otaStarting) break;
+      if (otaPromptChoice == 0) {           // install now → ask the host to begin
+        sendOtaConfirm();
+        M5Dial.Speaker.tone(1600, 80);
+        otaStarting = true;
+        otaPromptStartedAt = millis();
+      } else {                              // later → dismiss to home
+        otaAvailVersion[0] = 0;
+        appState = homeView();
+      }
+      needsRedraw = true;
       break;
 
     case MODE_MENU:
@@ -1014,6 +1104,11 @@ void loop() {
   // Confirming auto-dismiss -> show next pending (or fall back)
   if (appState == CONFIRMING && (millis() - confirmStart) > 1500) {
     permShowNext();
+  }
+
+  // OTA install requested but the host never started the stream -> back to choice.
+  if (appState == OTA_PROMPT && otaStarting && (millis() - otaPromptStartedAt) > 20000) {
+    otaStarting = false; needsRedraw = true;
   }
 
   // Permission timeout -> "ask" (host falls back to normal terminal prompt)

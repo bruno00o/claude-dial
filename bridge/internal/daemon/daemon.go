@@ -5,6 +5,7 @@ package daemon
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 
 	"github.com/bruno00o/claude-dial/bridge/internal/firmware"
@@ -28,10 +29,15 @@ type Device interface {
 }
 
 // Flasher is an optional Device capability: pushing a firmware image over the
-// transport. Only the BLE Dial implements it; the daemon type-asserts for it.
+// transport, plus the tactile "update available" prompt loop. Only the BLE Dial
+// implements it; the daemon type-asserts for it.
 type Flasher interface {
 	OTACapable() bool
 	Flash(image []byte, onProgress func(pct int)) error
+	// SetUpdateAvailable drives the Dial's "update available" prompt (empty
+	// version clears it). OTARequests streams the user's install confirmations.
+	SetUpdateAvailable(version string)
+	OTARequests() <-chan struct{}
 }
 
 // Daemon wires the session store to a device.
@@ -41,9 +47,10 @@ type Daemon struct {
 	timeout time.Duration
 	debug   bool
 
-	router *router
-	rules  *rules.Store
-	fw     *firmware.Checker
+	router  *router
+	rules   *rules.Store
+	fw      *firmware.Checker
+	otaBusy atomic.Bool // guards against concurrent firmware flashes
 }
 
 // Config tunes the daemon.
@@ -105,6 +112,7 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 	go d.dispatch()
 	go d.sweep(cfg.IdleAfter, cfg.BlockedIdleAfter, cfg.ForgetAfter)
 	go d.fw.Run(context.Background(), 30*time.Minute)
+	go d.consumeOTARequests()
 	return d
 }
 
@@ -120,6 +128,7 @@ func (d *Daemon) sweep(idleAfter, blockedIdleAfter, forgetAfter time.Duration) {
 	for range tick.C {
 		d.store.Sweep(idleAfter, blockedIdleAfter, forgetAfter)
 		d.broadcast()
+		d.advertiseUpdate()
 	}
 }
 

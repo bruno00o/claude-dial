@@ -81,3 +81,24 @@ func (f *fanout) Flash(image []byte, onProgress func(pct int)) error {
 	}
 	return errors.New("no OTA-capable device connected")
 }
+
+// SetUpdateAvailable forwards to every Flasher (there's only the Dial in
+// practice); each dedups its own writes.
+func (f *fanout) SetUpdateAvailable(version string) {
+	for _, d := range f.devices {
+		if fl, ok := d.(Flasher); ok {
+			fl.SetUpdateAvailable(version)
+		}
+	}
+}
+
+// OTARequests returns the first Flasher's request stream (the Dial's). If none
+// implements it, a nil channel that never fires.
+func (f *fanout) OTARequests() <-chan struct{} {
+	for _, d := range f.devices {
+		if fl, ok := d.(Flasher); ok {
+			return fl.OTARequests()
+		}
+	}
+	return nil
+}
