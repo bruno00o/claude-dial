@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/bruno00o/claude-dial/compare/v0.11.0...v0.12.0) (2026-07-02)
+
+
+### Features
+
+* **sound:** distinct earcons per event + a volume/mute setting ([cc826bc](https://github.com/bruno00o/claude-dial/commit/cc826bc5b8122fe54f0042957205d9deaa2f3053))
+
 ## [0.11.0](https://github.com/bruno00o/claude-dial/compare/v0.10.0...v0.11.0) (2026-07-02)
 
 
