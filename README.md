@@ -64,8 +64,32 @@ Flash `firmware/` to an M5Stack Dial, then add `--ble`:
 The simulator and the Dial run together (state mirrors to both, decisions merge
 from either). BLE starts fully in the background: if Bluetooth is off, denied,
 or no Dial is around, the bridge runs normally on the simulator alone — the
-gadget never blocks startup. BLE needs cgo (CoreBluetooth on macOS); on first
-run macOS asks for Bluetooth permission.
+gadget never blocks startup.
+
+macOS Bluetooth permission is **per-executable**, and a background service can't
+show the permission prompt. So the first time — and again after switching
+binaries (e.g. a dev build → the Homebrew one) — run the daemon once in the
+**foreground** to grant it, then hand it back to the service:
+
+```sh
+claude-dial serve --ble   # click Allow on the Bluetooth prompt; "dial" goes scanning… → connected; Ctrl-C
+```
+
+Without this, a `brew services` daemon scans forever and never connects.
+
+## Install (Homebrew)
+
+```sh
+brew install bruno00o/tap/claude-dial
+claude-dial serve --ble             # once, in the foreground, to grant Bluetooth (see above)
+brew services start claude-dial     # keep it running at login — drives the Dial over BLE
+claude-dial hooks install --write   # point Claude Code at the bridge
+```
+
+The Dial's firmware updates itself over BLE: when the bridge is newer than the
+Dial it offers a tactile install right on the device (`claude-dial firmware
+status` shows the state). `brew upgrade claude-dial` first — the bridge never
+flashes firmware newer than itself.
 
 ## Protocol
 
