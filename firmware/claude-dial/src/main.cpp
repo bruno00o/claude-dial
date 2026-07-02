@@ -49,21 +49,21 @@
 
 // ── Colour palette ── amber phosphor "terminal" theme (matches the simulator) ──
 // Physical object is orange/grey/black: amber-orange = active, grey = idle,
-// black = background. The 16-bit sprite expects RGB565: LovyanGFX treats a plain
-// integer as a raw 565 value (NOT RGB888), so we convert at compile time — a
-// bare 0xRRGGBB hex renders as the wrong colour (a dark value comes out blue).
-#define RGB565(r, g, b) ((uint16_t)((((r) & 0xF8) << 8) | (((g) & 0xFC) << 3) | ((b) >> 3)))
-
-#define COL_BG          RGB565(0x0A, 0x08, 0x05)   // warm near-black
-#define COL_INK         RGB565(0xE9, 0xE2, 0xD6)   // selected row / command text
-#define COL_DIM         RGB565(0x8A, 0x81, 0x75)   // headers, footers, hints
-#define COL_GRAY        RGB565(0x6F, 0x69, 0x5F)   // idle rows
-#define COL_AMBER       RGB565(0xFF, 0xB0, 0x00)   // working / primary accent (A+C)
-#define COL_HOT         RGB565(0xFF, 0x7A, 0x18)   // needs-you / urgent — the 2nd temperature
-#define COL_AMBER_HOT   RGB565(0xFF, 0xC4, 0x6B)   // soft warning / usage mid-range
-#define COL_RED         RGB565(0xFF, 0x5B, 0x34)   // reject
-#define COL_RING        RGB565(0x2A, 0x23, 0x18)   // dim bezel ring
-#define COL_ARC_OFF     RGB565(0x14, 0x0F, 0x08)   // spent countdown-arc dots
+// black = background. Colours are plain RGB888 (0xRRGGBB): LovyanGFX reads an
+// integer colour argument as 888 and converts it to the panel's native RGB565,
+// handling byte order. (An earlier build hand-packed 565 and passed it raw —
+// LovyanGFX still read those bytes as 888, so amber came out green and the
+// background blue. Feed it 888 and let the library convert.)
+#define COL_BG          0x0A0805   // warm near-black
+#define COL_INK         0xE9E2D6   // selected row / command text
+#define COL_DIM         0x8A8175   // headers, footers, hints
+#define COL_GRAY        0x6F695F   // idle rows
+#define COL_AMBER       0xFFB000   // working / primary accent (A+C)
+#define COL_HOT         0xFF7A18   // needs-you / urgent — the 2nd temperature
+#define COL_AMBER_HOT   0xFFC46B   // soft warning / usage mid-range
+#define COL_RED         0xFF5B34   // reject
+#define COL_RING        0x2A2318   // dim bezel ring
+#define COL_ARC_OFF     0x140F08   // spent countdown-arc dots
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -700,10 +700,11 @@ static void drawIdle() {
 // Scale an RGB565 colour toward black by num/den — for the round-screen edge
 // fade (M5's trick: rows dim with distance from center, reading as a CRT
 // vignette that happens to suit the terminal look).
-static uint32_t dim565(uint32_t c, int num, int den) {
-  int r = (c >> 11) & 0x1F, g = (c >> 5) & 0x3F, b = c & 0x1F;
+// Scale an RGB888 colour toward black by num/den (per-channel).
+static uint32_t dimColor(uint32_t c, int num, int den) {
+  int r = (c >> 16) & 0xFF, g = (c >> 8) & 0xFF, b = c & 0xFF;
   r = r * num / den; g = g * num / den; b = b * num / den;
-  return (uint32_t)((r << 11) | (g << 5) | b);
+  return (uint32_t)((r << 16) | (g << 8) | b);
 }
 
 // Roster priority, mirroring the daemon's prioritize(): needs-you → working →
@@ -770,7 +771,7 @@ static void drawSessionList() {
       // it and it never reads like the amber "working" state.
       float ph = (millis() % 1100) / 1100.0f;
       float k  = ph < 0.5f ? ph * 2.0f : (1.0f - ph) * 2.0f;   // triangle 0..1..0
-      col = dim565(COL_HOT, 150 + (int)(k * 105.0f), 255);     // pulse 150..255
+      col = dimColor(COL_HOT, 150 + (int)(k * 105.0f), 255);     // pulse 150..255
     } else {
       col = COL_GRAY;                     // idle
     }
@@ -780,7 +781,7 @@ static void drawSessionList() {
     if (!waiting) {
       int f = 255 - abs(y - CY) * 2;
       if (f < 150) f = 150;
-      col = dim565(col, f, 255);
+      col = dimColor(col, f, 255);
     }
 
     char label[16];
