@@ -103,5 +103,25 @@ func (d *Daemon) dispatch() {
 
 // broadcast renders the current store to the device.
 func (d *Daemon) broadcast() {
-	d.dev.Update(protocol.Snapshot{Sessions: d.store.Snapshot()})
+	d.dev.Update(protocol.Snapshot{Sessions: disambiguate(d.store.Snapshot())})
+}
+
+// disambiguate makes each session's display name unique. When two or more
+// sessions share a project label (several Claude sessions in the same repo —
+// even on the same branch), a short session-id suffix is appended to the
+// colliding ones; a session alone in its project keeps the bare name. The
+// session id is the only guaranteed-unique key, and the suffix is stable (unlike
+// an ordinal, which would shift when a session ends). Operates on the fresh
+// slice from Snapshot, so the store is untouched, and benefits every device.
+func disambiguate(sessions []protocol.SessionView) []protocol.SessionView {
+	counts := make(map[string]int, len(sessions))
+	for _, s := range sessions {
+		counts[s.Project]++
+	}
+	for i := range sessions {
+		if counts[sessions[i].Project] > 1 && len(sessions[i].SessionID) >= 3 {
+			sessions[i].Project += " " + sessions[i].SessionID[:3]
+		}
+	}
+	return sessions
 }
