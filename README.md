@@ -19,7 +19,7 @@ proceeds with its normal terminal prompt. Nothing to configure.
 | Half | What it is | Stack |
 |------|------------|-------|
 | **The bridge** (`bridge/`) | A daemon on your Mac that speaks Claude Code's hooks and drives the object | Go, zero external deps |
-| **The object** (`firmware/`) | An [M5Stack Dial](https://docs.m5stack.com/en/core/M5Dial) (round screen + encoder) | C++ / PlatformIO / LVGL, BLE |
+| **The object** (`firmware/`) | An [M5Stack Dial](https://docs.m5stack.com/en/core/M5Dial) (round screen + encoder) | C++ / PlatformIO / M5Unified (M5GFX), NimBLE |
 
 ```
  Claude Code sessions ──HTTP hooks──▶  claude-dial daemon  ──BLE──▶  M5Stack Dial
@@ -116,24 +116,30 @@ The daemon maps decisions to Claude Code permission decisions:
 
 ## Status
 
-Early scaffold. Working today:
+Working end-to-end, released on Homebrew, firmware validated on-device.
 
 - [x] Bridge daemon: HTTP hook endpoint, per-session state, approve/deny loop
 - [x] Golden-rule fallback (daemon down → terminal; no dial → `ask`; timeout → `ask`)
 - [x] Web simulator (round screen, live sessions, tactile approve/deny)
 - [x] `hooks install/uninstall` for `~/.claude/settings.json`
-- [x] BLE `Device` (`--ble`) to drive the real M5Stack Dial — compiles; needs on-device testing
-- [ ] Firmware polish (`firmware/`, draft included)
-- [ ] `always_allow` → persistent permission rule
-- [ ] Usage / limits view (see below)
-- [ ] Homebrew formula + `brew services`
+- [x] BLE `Device` (`--ble`) driving the real M5Stack Dial — validated on hardware
+- [x] Firmware: amber "terminal" UI (agent roster, full-screen permission takeover,
+      clock, settings), sound cues, a first-run pairing screen, and factory reset
+- [x] `always_allow` → persistent permission rule (per session, survives a restart)
+- [x] Usage view: an ambient rim gauge of the trailing 5-hour token window (see below)
+- [x] Homebrew formula + `brew services` (a launchd agent that starts at login)
+- [x] Firmware self-update over BLE (OTA), gated so the Dial never runs ahead of the bridge
 
-### On usage (a later view)
+### Usage view
 
-Showing usage/consumption is planned as a **secondary view**, not competing with
-the session/approval face. The proven recipe (see the sibling project
-[Claudial](https://github.com/Moge800/Claudial)) is to poll Claude's API
-rate-limit headers (~60 s, ~cents/month), rather than OTEL or transcript parsing.
+The rim of the screen doubles as an ambient usage gauge: it fills with how much of
+the trailing **5-hour token window** you've spent, shading amber → hot → red as you
+near the cap. The numbers come from **Claude Code's local transcripts** (the
+[ccusage](https://github.com/ryoppippi/ccusage) approach) — no API key and no extra
+polling of Anthropic — so it reflects real usage and keeps working offline. (An
+earlier plan to read API rate-limit headers, like the sibling project
+[Claudial](https://github.com/Moge800/Claudial), was dropped: the daemon can't see
+a session's API calls, but it *can* read what those calls wrote to disk.)
 
 ## License
 
