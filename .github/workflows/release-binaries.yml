@@ -115,8 +115,9 @@ jobs:
         with:
           python-version: "3.x"
 
-      - name: Install PlatformIO
-        run: pip install --upgrade platformio
+      - name: Install PlatformIO + esptool
+        # esptool<5 keeps the classic `merge_bin` + underscore flag syntax used below.
+        run: pip install --upgrade platformio "esptool<5"
 
       - name: Build firmware
         run: |
@@ -127,25 +128,45 @@ jobs:
             > firmware/claude-dial/src/version_override.h
           pio run -d firmware/claude-dial
 
-      - name: Package image + manifest
+      - name: Package images + manifest
         id: pkg
         run: |
           TAG="${{ inputs.tag }}"
           VERSION="${TAG#v}"
+          BUILD=firmware/claude-dial/.pio/build/m5stack-dial
+
+          # OTA app image (flashed to a partition over BLE by `firmware update`).
           BIN="claude-dial-firmware_${TAG}_esp32s3.bin"
-          cp firmware/claude-dial/.pio/build/m5stack-dial/firmware.bin "$BIN"
+          cp "$BUILD/firmware.bin" "$BIN"
           SHA="$(shasum -a 256 "$BIN" | cut -d' ' -f1)"
           URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${BIN}"
-          printf '{\n  "version": "%s",\n  "url": "%s",\n  "sha256": "%s"\n}\n' \
-            "$VERSION" "$URL" "$SHA" > firmware.json
+
+          # Full USB-flashable factory image: bootloader + partition table +
+          # otadata + app, merged at their flash offsets so `firmware flash`
+          # (esptool write_flash 0x0) lands claude-dial on a blank Dial. The
+          # ESP32-S3 bootloader lives at 0x0 (unlike classic ESP32's 0x1000).
+          BOOT_APP0="$(find "$HOME/.platformio/packages" -name boot_app0.bin | head -1)"
+          FACTORY="claude-dial-firmware_${TAG}_esp32s3-factory.bin"
+          esptool --chip esp32s3 merge_bin -o "$FACTORY" \
+            --flash_mode dio --flash_freq 80m --flash_size 8MB \
+            0x0 "$BUILD/bootloader.bin" \
+            0x8000 "$BUILD/partitions.bin" \
+            0xe000 "$BOOT_APP0" \
+            0x10000 "$BUILD/firmware.bin"
+          FSHA="$(shasum -a 256 "$FACTORY" | cut -d' ' -f1)"
+          FURL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${FACTORY}"
+
+          printf '{\n  "version": "%s",\n  "url": "%s",\n  "sha256": "%s",\n  "factory_url": "%s",\n  "factory_sha256": "%s"\n}\n' \
+            "$VERSION" "$URL" "$SHA" "$FURL" "$FSHA" > firmware.json
           cat firmware.json
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+          echo "factory=$FACTORY" >> "$GITHUB_OUTPUT"
 
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload "${{ steps.pkg.outputs.tag }}" \
-            "${{ steps.pkg.outputs.bin }}" firmware.json \
+            "${{ steps.pkg.outputs.bin }}" "${{ steps.pkg.outputs.factory }}" firmware.json \
             --clobber --repo "$GITHUB_REPOSITORY"

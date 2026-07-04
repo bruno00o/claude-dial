@@ -27,10 +27,18 @@ import (
 const DefaultManifestURL = "https://github.com/bruno00o/claude-dial/releases/latest/download/firmware.json"
 
 // Manifest describes the latest published firmware image.
+//
+// URL/SHA256 point at the OTA *app* image (flashed to a partition over BLE by
+// `firmware update`). FactoryURL/FactorySHA256 point at the full USB-flashable
+// image (bootloader + partition table + app, merged at 0x0) that a blank Dial
+// needs for its first flash — see the flash package. Older releases have no
+// factory fields; the empty value degrades to a clear "not published" error.
 type Manifest struct {
-	Version string `json:"version"`
-	URL     string `json:"url"`
-	SHA256  string `json:"sha256"`
+	Version       string `json:"version"`
+	URL           string `json:"url"`
+	SHA256        string `json:"sha256"`
+	FactoryURL    string `json:"factory_url,omitempty"`
+	FactorySHA256 string `json:"factory_sha256,omitempty"`
 }
 
 // Checker caches the latest manifest, refreshed periodically by Run. Reads are
@@ -105,37 +113,57 @@ type httpError struct{ code int }
 
 func (e *httpError) Error() string { return "firmware manifest: HTTP " + strconv.Itoa(e.code) }
 
-// DownloadLatest fetches the latest firmware image and verifies its sha256
+// DownloadLatest fetches the latest OTA app image and verifies its sha256
 // against the manifest. Returns the image bytes and the manifest it came from.
 func (c *Checker) DownloadLatest(ctx context.Context) ([]byte, Manifest, error) {
 	m := c.Latest()
 	if m.URL == "" {
 		return nil, m, fmt.Errorf("no firmware manifest available")
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, m.URL, nil)
-	if err != nil {
-		return nil, m, err
+	data, err := download(ctx, m.URL, m.SHA256)
+	return data, m, err
+}
+
+// DownloadFactory fetches the full USB-flashable factory image (bootloader +
+// partition table + app, merged at 0x0) and verifies its sha256. This is what a
+// blank Dial needs for its first flash; the BLE OTA path (DownloadLatest) only
+// updates an already-flashed Dial.
+func (c *Checker) DownloadFactory(ctx context.Context) ([]byte, Manifest, error) {
+	m := c.Latest()
+	if m.FactoryURL == "" {
+		return nil, m, fmt.Errorf("this release has no USB factory image (published from %s)", c.url)
 	}
-	client := &http.Client{Timeout: 2 * time.Minute} // images are ~1 MB over BLE-less HTTP
+	data, err := download(ctx, m.FactoryURL, m.FactorySHA256)
+	return data, m, err
+}
+
+// download fetches url over HTTP and, when wantSHA is non-empty, verifies the
+// body's sha256 against it.
+func download(ctx context.Context, url, wantSHA string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	client := &http.Client{Timeout: 2 * time.Minute} // images are ~1 MB over HTTP
 	resp, err := client.Do(req)
 	if err != nil {
-		return nil, m, err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, m, &httpError{resp.StatusCode}
+		return nil, &httpError{resp.StatusCode}
 	}
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // 16 MB cap
 	if err != nil {
-		return nil, m, err
+		return nil, err
 	}
-	if m.SHA256 != "" {
+	if wantSHA != "" {
 		sum := sha256.Sum256(data)
-		if got := hex.EncodeToString(sum[:]); got != m.SHA256 {
-			return nil, m, fmt.Errorf("firmware sha256 mismatch: manifest %s, got %s", m.SHA256, got)
+		if got := hex.EncodeToString(sum[:]); got != wantSHA {
+			return nil, fmt.Errorf("firmware sha256 mismatch: manifest %s, got %s", wantSHA, got)
 		}
 	}
-	return data, m, nil
+	return data, nil
 }
 
 // Newer reports whether available is a strictly newer version than running.

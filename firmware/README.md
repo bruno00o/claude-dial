@@ -29,13 +29,43 @@ Messages match `internal/protocol` on the daemon side:
 {"session_id":"…","decision":"allow_once"}   // allow_once | always_allow | reject | ask
 ```
 
-## Build
+## Flashing a Dial
+
+**A blank Dial** (or one running other firmware) needs a first flash over USB —
+BLE OTA (`claude-dial firmware update`) only works once claude-dial is already on
+the device. The bridge drives this via esptool, with a device picker + confirm:
+
+```sh
+brew install esptool                 # one-time (or: pip install esptool)
+claude-dial firmware flash           # lists USB devices → pick → confirm → flash
+```
+
+It downloads the release's **factory image** (bootloader + partition table +
+app, merged at 0x0). Flags: `--serial <dev>` to skip the picker, `--yes` to skip
+the prompt, `--image <bin>` to flash a local build instead of downloading.
+
+Once flashed, later updates go over BLE: `claude-dial firmware update`.
+
+## Build (from source)
 
 ```sh
 cd firmware/claude-dial
 pio run                # build
-pio run -t upload      # flash the Dial over USB-C
+pio run -t upload      # flash the Dial over USB-C directly
 pio device monitor     # serial logs
+```
+
+To flash a **locally built** image with the bridge (e.g. offline, before a
+release ships the factory image), merge it the way CI does and pass `--image`:
+
+```sh
+B=.pio/build/m5stack-dial
+BOOT_APP0=$(find ~/.platformio/packages -name boot_app0.bin | head -1)
+esptool --chip esp32s3 merge_bin -o factory.bin \
+  --flash_mode dio --flash_freq 80m --flash_size 8MB \
+  0x0 $B/bootloader.bin 0x8000 $B/partitions.bin \
+  0xe000 "$BOOT_APP0" 0x10000 $B/firmware.bin
+claude-dial firmware flash --image factory.bin
 ```
 
 `platformio.ini` is a starting point; lib versions may need pinning.
