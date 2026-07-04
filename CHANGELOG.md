@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.1.0](https://github.com/bruno00o/claude-dial/compare/v1.0.1...v1.1.0) (2026-07-04)
+
+
+### Features
+
+* **firmware:** first-flash a blank Dial over USB via esptool ([8764bdf](https://github.com/bruno00o/claude-dial/commit/8764bdfd0f793b7a90c807410047b1ab7cc76727))
+
 ## [1.0.1](https://github.com/bruno00o/claude-dial/compare/v1.0.0...v1.0.1) (2026-07-02)
 
 
