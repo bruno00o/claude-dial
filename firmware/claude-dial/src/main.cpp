@@ -38,6 +38,35 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
+// ── Premium anti-aliased type: JetBrains Mono embedded as VLW fonts ──────────
+// Three sizes replace the aliased built-in FreeMono, matching the web simulator.
+// Loaded ONCE in setup() into persistent VLWfont instances; each PointerWrapper
+// must outlive its font (VLWfont streams glyph bitmaps lazily from the flash
+// array on every drawChar). If a load ever fails, useS/M/L fall back to FreeMono
+// so a font problem can never blank the screen.
+#include "jbmono_s.h"   // 16 px
+#include "jbmono_m.h"   // 24 px
+#include "jbmono_l.h"   // 36 px
+static lgfx::VLWfont      fontS, fontM, fontL;     // 16 / 24 / 36 px
+static lgfx::PointerWrapper wrapS, wrapM, wrapL;
+static bool g_fontOK = false;
+static char g_fontMsg[48] = "fonts not init";
+static void initFonts() {
+  wrapS.set(jbmono_s, jbmono_s_len);
+  wrapM.set(jbmono_m, jbmono_m_len);
+  wrapL.set(jbmono_l, jbmono_l_len);
+  bool s = fontS.loadFont(&wrapS);
+  bool m = fontM.loadFont(&wrapM);
+  bool l = fontL.loadFont(&wrapL);
+  g_fontOK = s && m && l;
+  snprintf(g_fontMsg, sizeof(g_fontMsg), "VLW load S=%d M=%d L=%d", s, m, l);
+}
+// Font selectors (defined after `canvas` below): premium VLW when loaded,
+// graceful FreeMono fallback otherwise, so a font problem never blanks the screen.
+static inline void useS();
+static inline void useM();
+static inline void useL();
+
 // ── BLE UUIDs ────────────────────────────────────────────────────────────────
 #define SVC_UUID  "12345678-1234-1234-1234-123456789ABC"
 #define RX_UUID   "12345678-1234-1234-1234-123456789ABD"
@@ -252,6 +281,11 @@ static QueueHandle_t         rxQueue = nullptr;
 
 // ── Display sprite ───────────────────────────────────────────────────────────
 static M5Canvas canvas(&M5Dial.Display);
+
+// Font selectors — premium VLW when loaded, graceful FreeMono fallback otherwise.
+static inline void useS() { if (g_fontOK) canvas.setFont(&fontS); else canvas.setFont(&fonts::FreeMono9pt7b);  }
+static inline void useM() { if (g_fontOK) canvas.setFont(&fontM); else canvas.setFont(&fonts::FreeMono12pt7b); }
+static inline void useL() { if (g_fontOK) canvas.setFont(&fontL); else canvas.setFont(&fonts::FreeMono18pt7b); }
 static const int CX = 120, CY = 120, CR = 120;
 
 // A quick colour circle grows from the center to full screen — a physical "look
@@ -703,7 +737,7 @@ static void drawIdle() {
   // Rim gauge: fills with the 5h usage window (all-dim ambient bezel at 0%).
   drawUsageArcBold(usagePct / 100.0f, usageColor(), COL_ARC_OFF);   // smooth AA ring
   if (usagePct > 0) {   // label the rim so it isn't mistaken for a context gauge
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_center);
     canvas.setTextColor(COL_DIM, COL_BG);
     char rimLbl[12]; snprintf(rimLbl, sizeof(rimLbl), "5h %d%%", usagePct);
@@ -715,11 +749,11 @@ static void drawIdle() {
   // the bridge connects the first time (see hasEverConnected).
   if (!bleConnected && !hasEverConnected) {
     canvas.setTextDatum(middle_center);
-    canvas.setFont(&fonts::FreeMono12pt7b);
+    useM();
     canvas.setTextColor(COL_AMBER, COL_BG);
     canvas.drawString("claude-dial", CX, CY - 58);
 
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
     canvas.drawString("not paired yet", CX, CY - 30);
     canvas.drawString("set up on your Mac", CX, CY - 6);
@@ -736,7 +770,7 @@ static void drawIdle() {
 
   canvas.setTextDatum(middle_center);
   canvas.setTextColor(COL_AMBER, COL_BG);
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();                            // premium VLW clock (de-risk: this screen first)
   canvas.drawString(tBuf, CX, CY - 14);
 
   int act = activeSessions();
@@ -745,13 +779,13 @@ static void drawIdle() {
   else if (act > 0)       snprintf(status, sizeof(status), "%d session%s", act, act > 1 ? "s" : "");
   else                    strlcpy(status, "waiting for claude", sizeof(status));
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString(status, CX, CY + 26);
 
   canvas.fillCircle(CX, CY + 50, 3, bleConnected ? COL_AMBER : COL_RING);
   if (bleConnected && hostName[0]) {           // which machine we're driving
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
     char hs[40], hf[40];
     hostShort(hostName, hs, sizeof(hs));
@@ -785,7 +819,7 @@ static void drawSessionList() {
   drawBase();
   drawUsageArcBold(usagePct / 100.0f, usageColor(), COL_ARC_OFF);   // bold usage ring (5h window)
   if (usagePct > 0) {   // anchor the rim's meaning so it never reads as "context"
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_center);
     canvas.setTextColor(COL_DIM, COL_BG);
     char rimLbl[12]; snprintf(rimLbl, sizeof(rimLbl), "5h %d%%", usagePct);
@@ -811,7 +845,7 @@ static void drawSessionList() {
   // header — masthead like the web roster: count (amber) + "session(s)" (dim) on
   // the left, the clock (dim) on the right, with a hairline rule beneath. "claude ›"
   // is dropped: the round chord can't hold branding + clock on one line.
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   const int hy = 50, hcw = canvas.textWidth("0");
   char cnt[8]; snprintf(cnt, sizeof(cnt), "%d", n);
   canvas.setTextDatum(middle_left);
@@ -835,7 +869,7 @@ static void drawSessionList() {
   if (listScrollOffset < 0) listScrollOffset = 0;
 
   const int startY = 74, rowH = 32;
-  canvas.setFont(&fonts::FreeMono9pt7b);   // rows in body size (labels + spinner)
+  useS();   // rows in body size (labels + spinner)
   for (int row = 0; row < visible && (listScrollOffset + row) < n; row++) {
     Session& s = sessions[active[listScrollOffset + row]];
     int y = startY + row * rowH;
@@ -898,7 +932,7 @@ static void drawSessionList() {
 
   // footer — only shown when something actually needs you; silence otherwise
   if (waits > 0) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_center);
     char ft[20]; snprintf(ft, sizeof(ft), "%d waiting", waits);
     canvas.setTextColor(COL_HOT, COL_BG);   // match the hot "needs you" rows
@@ -960,7 +994,7 @@ static void drawPermission() {
   Session& s = sessions[idx];
 
   drawBase();
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
 
   // Compose "$ tool command", wrap it fully, and flag risky commands (P5).
   bool danger = isDangerous(s.command);
@@ -987,7 +1021,7 @@ static void drawPermission() {
 
   // ── P2: full-screen command reader — scroll the whole command with the encoder
   if (permCmdView) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_center);
     canvas.setTextColor(danger ? COL_RED : COL_DIM, COL_BG);
     canvas.drawString(danger ? "! command" : "command", CX, 32);
@@ -995,13 +1029,13 @@ static void drawPermission() {
     const int visible = 6, top = 58, lh = 20;
     if (permCmdScroll > total - visible) permCmdScroll = total - visible;
     if (permCmdScroll < 0) permCmdScroll = 0;
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_left);
     canvas.setTextColor(cmdCol, COL_BG);
     for (int r = 0; r < visible && (permCmdScroll + r) < total; r++)
       canvas.drawString(lines[permCmdScroll + r], 22, top + r * lh);
 
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_center);
     canvas.setTextColor(COL_DIM, COL_BG);
     if (total > visible) {
@@ -1014,53 +1048,57 @@ static void drawPermission() {
   }
 
   // ── choices view ──
-  // project (who) + queue badge — small, dropped to y=42 where the chord is wider
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  // project (who) + queue badge. The who-label is hard-capped so wider VLW glyphs
+  // can never collide with the right-side badge (ends by ~CX+16).
+  useS();
   char who[16], wf[20]; sessionLabel(s, who, sizeof(who));
-  fitChord(who, wf, sizeof(wf), CX - 80, 42, 'L');
+  int cwv = canvas.textWidth("0"); if (cwv < 1) cwv = 1;
+  int whoCap = ((CX + 16) - (CX - 80)) / cwv; if (whoCap < 1) whoCap = 1;
+  if ((size_t)whoCap + 1 > sizeof(wf)) whoCap = sizeof(wf) - 1;
+  strlcpy(wf, who, (size_t)whoCap + 1);
   canvas.setTextDatum(middle_left);
   canvas.setTextColor(COL_AMBER, COL_BG);
-  canvas.drawString(wf, CX - 80, 42);
+  canvas.drawString(wf, CX - 80, 44);
   canvas.setTextDatum(middle_right);
   canvas.setTextColor(COL_DIM, COL_BG);
   if (permQueueCount > 0) {
     char more[14]; snprintf(more, sizeof(more), "<%d more>", permQueueCount);
-    canvas.drawString(more, CX + 80, 42);
+    canvas.drawString(more, CX + 82, 44);
   } else {
-    canvas.drawString("last", CX + 80, 42);
+    canvas.drawString("last", CX + 82, 44);
   }
 
   // eyebrow — warns when risky (small)
   canvas.setTextDatum(middle_center);
   canvas.setTextColor(danger ? COL_RED : COL_AMBER_HOT, COL_BG);
-  canvas.drawString(danger ? "! caution" : "permission", CX, 62);
+  canvas.drawString(danger ? "! caution" : "permission", CX, 66);
 
   // up to 3 command lines (body); when it overflows show 2 + a "tap to read" hint
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   int shown = permCmdOverflow ? 2 : total;
   canvas.setTextColor(cmdCol, COL_BG);
-  for (int r = 0; r < shown; r++) canvas.drawString(lines[r], CX, 88 + r * 18);
+  for (int r = 0; r < shown; r++) canvas.drawString(lines[r], CX, 90 + r * 20);
   if (permCmdOverflow) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
-    canvas.drawString(".. tap to read", CX, 124);
+    canvas.drawString(".. tap to read", CX, 130);
   }
 
-  // per-conversation context fill (when known and the command fit) — small + dim.
-  // The one per-session number that earns a spot, on the focused permission view.
-  if (s.context_tokens > 0 && !permCmdOverflow) {
+  // per-conversation context fill — small + dim. Shown only when the command fits
+  // in <=2 lines, so it never collides with a 3rd command line.
+  if (s.context_tokens > 0 && total <= 2) {
     char cn[24], ctxLine[32];
     fmtTokens(s.context_tokens, cn, sizeof(cn));
     snprintf(ctxLine, sizeof(ctxLine), "ctx %s", cn);
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_center);
     canvas.setTextColor(COL_DIM, COL_BG);
-    canvas.drawString(ctxLine, CX, 138);
+    canvas.drawString(ctxLine, CX, 134);
   }
 
   // choices — body size, caret ">" on the selected one
-  canvas.setFont(&fonts::FreeMono9pt7b);
-  int btnY[3] = { 152, 176, 200 };
+  useS();
+  int btnY[3] = { 156, 180, 204 };
   for (int i = 0; i < 3; i++) {
     bool sel = (i == permChoice);
     uint32_t col = !sel ? COL_GRAY : (i == 2 ? COL_RED : COL_AMBER);
@@ -1089,15 +1127,15 @@ static void drawConfirming() {
   }
 
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("sending", CX, 86);
 
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(accent, COL_BG);
   canvas.drawString(choiceLabels[confirmChoice], CX, 116);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_INK, COL_BG);
   canvas.drawString("tap to undo", CX, 152);
   canvas.pushSprite(0, 0);
@@ -1168,11 +1206,11 @@ static void drawMenuIcon(int k, int x, int y, uint32_t col) {
 
 static void drawModeMenu() {
   drawBase();
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   drawTracked("SETTINGS", CX, 22, 3);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   for (int i = 0; i < MENU_N; i++) {
     bool sel = (i == menuChoice);
     int  y   = CY - (MENU_N - 1) * (MENU_GAP / 2) + i * MENU_GAP;   // vertically centered
@@ -1202,16 +1240,16 @@ static void drawReset() {
   drawBase();
   canvas.setTextDatum(middle_center);
 
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(COL_RED, COL_BG);
   canvas.drawString("factory reset", CX, 64);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("wipes settings,", CX, 94);
   canvas.drawString("then restarts", CX, 112);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   const char* opts[2] = { "cancel", "reset" };
   for (int i = 0; i < 2; i++) {
     bool sel = (i == resetChoice);
@@ -1228,12 +1266,12 @@ static void drawReset() {
 static void drawBrightness() {
   drawBase();
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("brightness", CX, 72);
 
   char pct[8]; snprintf(pct, sizeof(pct), "%d%%", (brightness * 100) / 255);
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();
   canvas.setTextColor(COL_AMBER, COL_BG);
   canvas.drawString(pct, CX, CY - 6);
 
@@ -1241,7 +1279,7 @@ static void drawBrightness() {
   canvas.drawRoundRect(bx, by, bw, bh, 4, COL_RING);
   canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * brightness / 255, bh - 2, 3, COL_AMBER);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("turn / press", CX, 190);
   canvas.pushSprite(0, 0);
@@ -1250,11 +1288,11 @@ static void drawBrightness() {
 static void drawSound() {
   drawBase();
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("sound", CX, 72);
 
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();
   if (soundVol == 0) {
     canvas.setTextColor(COL_GRAY, COL_BG);
     canvas.drawString("muted", CX, CY - 6);
@@ -1268,7 +1306,7 @@ static void drawSound() {
   canvas.drawRoundRect(bx, by, bw, bh, 4, COL_RING);
   if (soundVol) canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * soundVol / 255, bh - 2, 3, COL_AMBER);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("turn / press", CX, 190);
   canvas.pushSprite(0, 0);
@@ -1280,19 +1318,19 @@ static void drawConnection() {
   drawBase();
   canvas.setTextDatum(middle_center);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("connection", CX, 40);
 
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(bleConnected ? COL_AMBER : COL_GRAY, COL_BG);
   canvas.drawString(bleConnected ? "connected" : "scanning...", CX, 72);
 
   if (bleConnected && hostName[0]) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
     canvas.drawString("host", CX, 104);
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_INK, COL_BG);
     char hs[40], hf[40];
     hostShort(hostName, hs, sizeof(hs));
@@ -1301,7 +1339,7 @@ static void drawConnection() {
   }
 
   // this Dial's id (BLE address) — dim, at the bottom; short tail to fit the disc
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   char idbuf[16];
   if (dialId[0]) {
@@ -1332,7 +1370,7 @@ static void drawClock() {
   // Terminal readout: HH:MM:SS with live seconds and wide tracking.
   char tBuf[12];
   snprintf(tBuf, sizeof(tBuf), "%02d:%02d:%02d", dt.time.hours, dt.time.minutes, dt.time.seconds);
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();
   canvas.setTextColor(COL_AMBER, COL_BG);
   drawTracked(tBuf, CX, CY - 6, 1);
 
@@ -1344,7 +1382,7 @@ static void drawClock() {
   int wd = dayOfWeek(dt.date.year, mo, dt.date.date);
   char dBuf[20];
   snprintf(dBuf, sizeof(dBuf), "%s %02d %s %04d", WD[wd], dt.date.date, MO[mo - 1], dt.date.year);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   drawTracked(dBuf, CX, CY + 28, 2);
 
@@ -1386,7 +1424,7 @@ static void drawOtaProgress() {
   }
 
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   char head[24];
   if (otaTargetVersion[0]) snprintf(head, sizeof(head), "installing %s", otaTargetVersion);
@@ -1394,11 +1432,11 @@ static void drawOtaProgress() {
   canvas.drawString(head, CX, 90);
 
   char pctStr[8]; snprintf(pctStr, sizeof(pctStr), "%u%%", pct);
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();
   canvas.setTextColor(COL_AMBER, COL_BG);
   canvas.drawString(pctStr, CX, 126);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("keep the dial close", CX, 162);
 
@@ -1410,16 +1448,16 @@ static void drawOtaPrompt() {
   drawBase();
   canvas.setTextDatum(middle_center);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("firmware update", CX, 56);
 
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(COL_AMBER, COL_BG);
   canvas.drawString(otaAvailVersion, CX, 86);
 
   if (otaStarting) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_INK, COL_BG);
     canvas.drawString("starting..", CX, 140);
     canvas.pushSprite(0, 0);
@@ -1429,7 +1467,7 @@ static void drawOtaPrompt() {
   const char* opts[2] = { "install now", "later" };
   for (int i = 0; i < 2; i++) {
     bool sel = (otaPromptChoice == i);
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(sel ? COL_INK : COL_GRAY, COL_BG);
     char row[24]; snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", opts[i]);
     canvas.drawString(row, CX, 130 + i * 26);
@@ -1442,25 +1480,25 @@ static void drawFirmwareInfo() {
   drawBase();
   canvas.setTextDatum(middle_center);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("firmware", CX, 60);
 
   char v[24]; snprintf(v, sizeof(v), "v%s", FW_VERSION);
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(COL_INK, COL_BG);
   canvas.drawString(v, CX, 90);
 
   if (otaAvailVersion[0]) {
     char u[28]; snprintf(u, sizeof(u), "update %s", otaAvailVersion);
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_AMBER, COL_BG);
     canvas.drawString(u, CX, 130);
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
     canvas.drawString("press to install", CX, 156);
   } else {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_GRAY, COL_BG);
     canvas.drawString("up to date", CX, 138);
   }
@@ -1709,6 +1747,8 @@ void setup() {
   pinMode(46, OUTPUT);
   digitalWrite(46, HIGH);          // POWER_HOLD: keep on when on battery/DC
 
+  Serial.begin(115200);            // USB CDC — boot/font diagnostics
+
   auto cfg = M5.config();
   M5Dial.begin(cfg, true, false);  // encoder on, RFID off
 
@@ -1721,11 +1761,14 @@ void setup() {
   canvas.setColorDepth(16);          // RGB565 — set depth before allocating
   canvas.createSprite(240, 240);
 
+  initFonts();                       // load the embedded JetBrains Mono VLW faces
+  Serial.printf("[claude-dial] boot fw=%s  %s\n", FW_VERSION, g_fontMsg);
+
   // Soft boot fade-in (M5's touch): show a splash, then ramp the backlight up
   // instead of snapping on.
   drawBase();
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(COL_AMBER, COL_BG);
   canvas.drawString("claude-dial", CX, CY);
   canvas.pushSprite(0, 0);
@@ -1780,6 +1823,14 @@ void setup() {
 // ─────────────────────────────────────────────────────────────────────────────
 void loop() {
   M5Dial.update();
+
+  // Boot diagnostics: reprint font-load status each second for the first 15s so a
+  // serial monitor attached shortly after flashing always catches it.
+  static uint32_t lastBootPrint = 0;
+  if (millis() < 15000 && millis() - lastBootPrint > 1000) {
+    lastBootPrint = millis();
+    Serial.printf("[boot %lus] %s | ble=%d\n", millis() / 1000, g_fontMsg, (int)bleConnected);
+  }
 
   // Deferred "needs you" earcon (set from handleRxMessage, played off the BLE task)
   if (buzzPending) {
