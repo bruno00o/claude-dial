@@ -245,7 +245,9 @@ func countTaskBlocks(content json.RawMessage) int {
 	}
 	n := 0
 	for _, b := range blocks {
-		if b.Type == "tool_use" && b.Name == "Task" {
+		// Sub-agents are spawned by the Task tool in Claude Code; the Agent tool
+		// (and its aliases in some harnesses) does the same. Count either.
+		if b.Type == "tool_use" && (b.Name == "Task" || b.Name == "Agent") {
 			n++
 		}
 	}
