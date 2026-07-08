@@ -478,11 +478,13 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 	for _, s := range cur {
 		if p, exists := prev[s.SessionID]; !exists || !displayEqual(p, s) {
 			if d.write(protocol.Outbound{
-				SessionID: s.SessionID,
-				Project:   s.Project,
-				State:     s.State,
-				ToolName:  s.ToolName,
-				Command:   s.Command,
+				SessionID:     s.SessionID,
+				Project:       s.Project,
+				State:         s.State,
+				ToolName:      s.ToolName,
+				Command:       s.Command,
+				TotalTokens:   s.TotalTokens,   // piggybacked: not in displayEqual, so
+				ContextTokens: s.ContextTokens, // token drift alone never triggers a BLE write
 			}) {
 				d.mu.Lock()
 				d.last[s.SessionID] = s

@@ -41,6 +41,15 @@ type SessionView struct {
 	State     string `json:"state"`
 	ToolName  string `json:"tool_name,omitempty"`
 	Command   string `json:"command,omitempty"`
+
+	// Per-conversation usage, filled in by the daemon from this session's own
+	// transcript (whose filename is the session id). Both are raw token counts,
+	// never a percentage — context has no reliable denominator (a model's max is
+	// not carried in the transcript, and 1M-context variants share the base
+	// model id), so we surface honest counts and let the reader judge. Omitted
+	// (zero) when the daemon has no usage for the session yet.
+	TotalTokens   int64 `json:"total_tokens,omitempty"`   // cumulative "work" tokens spent (input+output+cache_creation)
+	ContextTokens int64 `json:"context_tokens,omitempty"` // tokens resident in the context window right now
 }
 
 // Snapshot is the full state pushed to a Device on every change.
@@ -59,6 +68,10 @@ type Outbound struct {
 	State     string `json:"state,omitempty"`
 	ToolName  string `json:"tool_name,omitempty"`
 	Command   string `json:"command,omitempty"`
+
+	// Per-conversation usage (see SessionView). Raw token counts, not a gauge.
+	TotalTokens   int64 `json:"total_tokens,omitempty"`
+	ContextTokens int64 `json:"context_tokens,omitempty"`
 
 	// control messages: {"type":"set_time","epoch":…,"tz_offset":…,"host":"…"},
 	// {"type":"ota_available","version":"0.6.0"} (empty version clears the prompt),

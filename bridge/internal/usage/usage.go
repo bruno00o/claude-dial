@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -44,13 +45,20 @@ type Stats struct {
 // Pct returns the gauge fill as a 0..100 integer.
 func (s Stats) Pct() int { return int(s.Fraction*100 + 0.5) }
 
+// SessionUsage is per-conversation usage derived from a single transcript file.
+type SessionUsage struct {
+	Total   int64 // cumulative "work" tokens (input+output+cache_creation) over all turns
+	Context int64 // tokens resident in the context window at the last main-thread assistant turn
+}
+
 // Reader scans the transcript dir and keeps the latest Stats.
 type Reader struct {
 	dir    string
 	budget int64 // explicit override; <=0 self-calibrates
 
-	mu     sync.RWMutex
-	latest Stats
+	mu         sync.RWMutex
+	latest     Stats
+	perSession map[string]SessionUsage
 }
 
 // NewReader reads transcripts from dir (empty → ~/.claude/projects). budgetTokens
@@ -61,7 +69,7 @@ func NewReader(dir string, budgetTokens int64) *Reader {
 			dir = filepath.Join(home, ".claude", "projects")
 		}
 	}
-	return &Reader{dir: dir, budget: budgetTokens}
+	return &Reader{dir: dir, budget: budgetTokens, perSession: map[string]SessionUsage{}}
 }
 
 // Latest returns the most recent computed stats (zero value until first Refresh).
@@ -69,6 +77,16 @@ func (r *Reader) Latest() Stats {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.latest
+}
+
+// PerSession returns per-conversation usage keyed by session id (the transcript
+// filename, minus .jsonl — the exact key the hooks report). Empty until the
+// first Refresh. The map is replaced whole on each Refresh and never mutated in
+// place, so callers may read it without copying.
+func (r *Reader) PerSession() map[string]SessionUsage {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.perSession
 }
 
 // Run refreshes now and then every interval until ctx is cancelled.
@@ -93,7 +111,7 @@ type event struct {
 
 // Refresh rescans the transcripts and recomputes Stats as of now.
 func (r *Reader) Refresh(now time.Time) error {
-	events, err := r.collect(now.Add(-historyDays * 24 * time.Hour))
+	events, per, err := r.collect(now.Add(-historyDays * 24 * time.Hour))
 	if err != nil {
 		return err
 	}
@@ -124,6 +142,7 @@ func (r *Reader) Refresh(now time.Time) error {
 
 	r.mu.Lock()
 	r.latest = Stats{Tokens: current, Budget: budget, Fraction: frac}
+	r.perSession = per
 	r.mu.Unlock()
 	return nil
 }
@@ -146,11 +165,14 @@ func peak5h(events []event) int64 {
 	return max
 }
 
-// collect reads every transcript touched since `since` and returns its usage
-// events. Files not modified within the window can't hold recent events, so we
-// skip them by mtime — the only thing that keeps a full rescan cheap.
-func (r *Reader) collect(since time.Time) ([]event, error) {
+// collect reads every transcript touched since `since` and returns both the
+// global usage events (for the 5h gauge) and per-session aggregates keyed by
+// session id (the file's basename). Files not modified within the window can't
+// hold recent events, so we skip them by mtime — the only thing that keeps a
+// full rescan cheap. Both outputs come from one pass over each file.
+func (r *Reader) collect(since time.Time) ([]event, map[string]SessionUsage, error) {
 	var events []event
+	per := make(map[string]SessionUsage)
 	err := filepath.WalkDir(r.dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || filepath.Ext(path) != ".jsonl" {
 			return nil
@@ -158,34 +180,60 @@ func (r *Reader) collect(since time.Time) ([]event, error) {
 		if info, e := d.Info(); e == nil && info.ModTime().Before(since) {
 			return nil // untouched in the window → no recent events
 		}
-		events = appendFileEvents(events, path, since)
+		var su SessionUsage
+		events, su = scanFile(events, path, since)
+		per[strings.TrimSuffix(filepath.Base(path), ".jsonl")] = su
 		return nil
 	})
 	if os.IsNotExist(err) {
-		return events, nil // no transcripts yet → zero usage, not an error
+		return events, per, nil // no transcripts yet → zero usage, not an error
 	}
-	return events, err
+	return events, per, err
 }
 
 // lineUsage is the minimal shape we parse out of each transcript line.
 type lineUsage struct {
-	Timestamp time.Time `json:"timestamp"`
-	Message   struct {
+	Timestamp   time.Time `json:"timestamp"`
+	Type        string    `json:"type"`        // "assistant", "user", …
+	IsSidechain bool      `json:"isSidechain"` // true for Task sub-agent turns
+	Message     struct {
 		Usage struct {
 			Input       int64 `json:"input_tokens"`
 			Output      int64 `json:"output_tokens"`
 			CacheCreate int64 `json:"cache_creation_input_tokens"`
+			CacheRead   int64 `json:"cache_read_input_tokens"`
 		} `json:"usage"`
 	} `json:"message"`
 }
 
-func appendFileEvents(events []event, path string, since time.Time) []event {
+// workTokens is what the 5h QUOTA gauge (and cumulative per-conversation spend)
+// counts: input + output + cache_creation. cache_read is deliberately excluded —
+// it is huge, cheap and discounted, and would swamp the number.
+func (l lineUsage) workTokens() int64 {
+	return l.Message.Usage.Input + l.Message.Usage.Output + l.Message.Usage.CacheCreate
+}
+
+// residentContextTokens is what fills the CONTEXT window on a turn: the input
+// actually handed to the model = input + cache_read + cache_creation. It is the
+// OPPOSITE cache_read rule to workTokens — it INCLUDES cache_read (the cached
+// prefix IS the in-context history) and EXCLUDES output (generated text is not
+// resident input). Keep the two helpers separate so a future "let's unify token
+// counting" refactor can't silently fold cache_read into the quota gauge.
+func (l lineUsage) residentContextTokens() int64 {
+	return l.Message.Usage.Input + l.Message.Usage.CacheRead + l.Message.Usage.CacheCreate
+}
+
+// scanFile reads one transcript once and returns (a) the in-window quota events
+// appended to events — identical to the old behaviour — and (b) the whole file's
+// per-conversation SessionUsage.
+func scanFile(events []event, path string, since time.Time) ([]event, SessionUsage) {
 	f, err := os.Open(path)
 	if err != nil {
-		return events
+		return events, SessionUsage{}
 	}
 	defer f.Close()
 
+	var su SessionUsage
 	// Transcript lines can be very large (images, long tool output), so read with
 	// an unbounded ReadBytes rather than a fixed-buffer Scanner.
 	br := bufio.NewReader(f)
@@ -194,9 +242,22 @@ func appendFileEvents(events []event, path string, since time.Time) []event {
 		if len(raw) > 0 {
 			var l lineUsage
 			if json.Unmarshal(raw, &l) == nil {
-				tok := l.Message.Usage.Input + l.Message.Usage.Output + l.Message.Usage.CacheCreate
-				if tok > 0 && !l.Timestamp.IsZero() && !l.Timestamp.Before(since) {
-					events = append(events, event{t: l.Timestamp, tok: tok})
+				work := l.workTokens()
+				// Global 5h gauge — unchanged: work tokens, in-window only.
+				if work > 0 && !l.Timestamp.IsZero() && !l.Timestamp.Before(since) {
+					events = append(events, event{t: l.Timestamp, tok: work})
+				}
+				// Cumulative per conversation: every turn's work tokens over the
+				// whole file (window-independent). Sub-agent (sidechain) turns are
+				// real spend, so they count here.
+				su.Total += work
+				// Context fill: the LAST main-thread assistant turn's resident input.
+				// Skip sidechain turns — a sub-agent's context is not this
+				// conversation's — and overwrite so the final value wins.
+				if l.Type == "assistant" && !l.IsSidechain {
+					if c := l.residentContextTokens(); c > 0 {
+						su.Context = c
+					}
 				}
 			}
 		}
@@ -207,5 +268,5 @@ func appendFileEvents(events []event, path string, since time.Time) []event {
 			break
 		}
 	}
-	return events
+	return events, su
 }

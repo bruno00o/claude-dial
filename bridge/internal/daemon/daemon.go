@@ -159,10 +159,21 @@ func (d *Daemon) dispatch() {
 	}
 }
 
-// broadcast renders the current store to the device.
+// broadcast renders the current store to the device, enriching each session with
+// its per-conversation usage. The usage reader keys transcripts by session id
+// (the filename), so this is an exact join onto the sessions we already track.
 func (d *Daemon) broadcast() {
+	sessions := prioritize(disambiguate(d.store.Snapshot()))
+	if per := d.usage.PerSession(); len(per) > 0 {
+		for i := range sessions {
+			if u, ok := per[sessions[i].SessionID]; ok {
+				sessions[i].TotalTokens = u.Total
+				sessions[i].ContextTokens = u.Context
+			}
+		}
+	}
 	d.dev.Update(protocol.Snapshot{
-		Sessions: prioritize(disambiguate(d.store.Snapshot())),
+		Sessions: sessions,
 		UsagePct: d.usage.Latest().Pct(),
 	})
 }

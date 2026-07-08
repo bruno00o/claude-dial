@@ -75,6 +75,8 @@ struct Session {
   char  state[24];      // working | idle | blocked | permission_request
   char  tool_name[40];
   char  command[200];
+  long  total_tokens;   // cumulative "work" tokens for this conversation (0 = unknown)
+  long  context_tokens; // tokens resident in the context window now (0 = unknown)
   bool  active;
 };
 
@@ -474,6 +476,8 @@ static void handleRxMessage(const char* data, uint16_t len) {
   strlcpy(sessions[idx].state,     state, sizeof(sessions[idx].state));
   strlcpy(sessions[idx].tool_name, tool,  sizeof(sessions[idx].tool_name));
   strlcpy(sessions[idx].command,   cmd,   sizeof(sessions[idx].command));
+  sessions[idx].total_tokens   = doc["total_tokens"]   | 0L;   // omitted on the wire → 0 (unknown)
+  sessions[idx].context_tokens = doc["context_tokens"] | 0L;
 
   if (strcmp(state, "permission_request") == 0) {
     bool isNew = !permInQueue(sid) && strcmp(currentPermSid, sid) != 0;
@@ -609,6 +613,13 @@ static void sessionLabel(const Session& s, char* out, size_t n) {
   if (strlen(s.session_id) > 12 && n > 11) { out[10] = '.'; out[11] = '.'; out[12] = 0; }
 }
 
+// Compact token count for the tiny screen: 216k, 1.2M. Mirrors the web's ftok().
+static void fmtTokens(long v, char* out, size_t n) {
+  if (v >= 1000000)   snprintf(out, n, "%.1fM", v / 1000000.0);
+  else if (v >= 1000) snprintf(out, n, "%ldk", (v + 500) / 1000);
+  else                snprintf(out, n, "%ld", v);
+}
+
 static void drawBase() {
   canvas.fillScreen(COL_BG);
   canvas.fillCircle(CX, CY, CR - 1, COL_BG);
@@ -675,6 +686,12 @@ static void drawIdle() {
   drawBase();
   // Rim gauge: fills with the 5h usage window (all-dim ambient bezel at 0%).
   drawDotRing(usagePct / 100.0f, usageColor(), COL_ARC_OFF, 60, CR - 8);
+  if (usagePct > 0) {   // label the rim so it isn't mistaken for a context gauge
+    canvas.setFont(&fonts::FreeMono9pt7b);
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("5h", CX, 16);
+  }
 
   // Fresh out of the box: never paired since boot. Show how to set up the Mac
   // bridge instead of a clock stuck on the wrong time. Disappears for good once
@@ -708,7 +725,7 @@ static void drawIdle() {
   int act = activeSessions();
   char status[40];
   if (!bleConnected)      strlcpy(status, "waiting for claude", sizeof(status));
-  else if (act > 0)       snprintf(status, sizeof(status), "%d agent%s", act, act > 1 ? "s" : "");
+  else if (act > 0)       snprintf(status, sizeof(status), "%d session%s", act, act > 1 ? "s" : "");
   else                    strlcpy(status, "waiting for claude", sizeof(status));
 
   canvas.setFont(&fonts::FreeMono9pt7b);
@@ -750,6 +767,12 @@ static int sessionRank(const Session& s) {
 static void drawSessionList() {
   drawBase();
   drawDotRing(usagePct / 100.0f, usageColor(), COL_ARC_OFF, 60, CR - 8);   // usage gauge on the rim
+  if (usagePct > 0) {   // anchor the rim's meaning so it never reads as "context"
+    canvas.setFont(&fonts::FreeMono9pt7b);
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("5h", CX, 16);
+  }
 
   int active[MAX_SESSIONS], n = 0, waits = 0;
   for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -771,9 +794,10 @@ static void drawSessionList() {
   canvas.setFont(&fonts::FreeMono9pt7b);
   canvas.setTextDatum(middle_center);
   canvas.setTextColor(COL_DIM, COL_BG);
+  // Just the session count — the rim owns the 5h % (it used to be printed here
+  // too, which read as a per-session figure next to the count).
   char hdr[24];
-  if (usagePct > 0) snprintf(hdr, sizeof(hdr), "%d agent%s  %d%%", n, n == 1 ? "" : "s", usagePct);
-  else              snprintf(hdr, sizeof(hdr), "%d agent%s", n, n == 1 ? "" : "s");
+  snprintf(hdr, sizeof(hdr), "%d session%s", n, n == 1 ? "" : "s");
   canvas.drawString(hdr, CX, 36);
 
   if (n == 0) {                 // no agents — the daemon switches us back to the clock
@@ -978,6 +1002,18 @@ static void drawPermission() {
     canvas.setFont(&fonts::FreeMono9pt7b);
     canvas.setTextColor(COL_DIM, COL_BG);
     canvas.drawString(".. tap to read", CX, 124);
+  }
+
+  // per-conversation context fill (when known and the command fit) — small + dim.
+  // The one per-session number that earns a spot, on the focused permission view.
+  if (s.context_tokens > 0 && !permCmdOverflow) {
+    char cn[24], ctxLine[32];
+    fmtTokens(s.context_tokens, cn, sizeof(cn));
+    snprintf(ctxLine, sizeof(ctxLine), "ctx %s", cn);
+    canvas.setFont(&fonts::FreeMono9pt7b);
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString(ctxLine, CX, 138);
   }
 
   // choices — body size, caret ">" on the selected one

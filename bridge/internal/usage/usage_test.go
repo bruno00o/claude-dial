@@ -103,3 +103,80 @@ func TestNoTranscriptsIsZero(t *testing.T) {
 		t.Errorf("want zero usage, got %+v", s)
 	}
 }
+
+// writeLines writes raw transcript lines (arbitrary JSON objects) verbatim.
+func writeLines(t *testing.T, dir, name string, lines []map[string]any) {
+	t.Helper()
+	var buf []byte
+	for _, m := range lines {
+		b, _ := json.Marshal(m)
+		buf = append(buf, b...)
+		buf = append(buf, '\n')
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), buf, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func asstLine(ts time.Time, sidechain bool, in, out, cc, cr int64) map[string]any {
+	return map[string]any{
+		"type":        "assistant",
+		"isSidechain": sidechain,
+		"timestamp":   ts.UTC().Format(time.RFC3339Nano),
+		"message": map[string]any{
+			"role": "assistant",
+			"usage": map[string]any{
+				"input_tokens":                in,
+				"output_tokens":               out,
+				"cache_creation_input_tokens": cc,
+				"cache_read_input_tokens":     cr,
+			},
+		},
+	}
+}
+
+// TestPerSessionUsage pins the two opposite token rules the debate flagged:
+//   - Total (cumulative spend) = work tokens (input+output+cache_creation), across
+//     ALL turns including sub-agent (sidechain) turns; cache_read excluded.
+//   - Context (resident window) = the LAST MAIN-THREAD assistant turn's
+//     input+cache_read+cache_creation; cache_read INCLUDED, output excluded, and
+//     sidechain turns skipped so a sub-agent's context never lands on the parent.
+func TestPerSessionUsage(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	writeLines(t, dir, "sess-1.jsonl", []map[string]any{
+		{"type": "user", "timestamp": now.Add(-30 * time.Minute).UTC().Format(time.RFC3339Nano)}, // no usage
+		asstLine(now.Add(-20*time.Minute), false, 100, 50, 10, 1000),                             // work 160, ctx 1110
+		asstLine(now.Add(-10*time.Minute), true, 5, 5, 0, 7000),                                  // sidechain: work 10 → Total; ctx ignored
+		asstLine(now.Add(-5*time.Minute), false, 200, 20, 30, 5000),                              // last main-thread: work 250, ctx 5230
+	})
+	writeLines(t, dir, "sess-2.jsonl", []map[string]any{
+		asstLine(now.Add(-1*time.Minute), false, 1, 1, 1, 9), // work 3, ctx 11
+	})
+
+	r := NewReader(dir, 0)
+	if err := r.Refresh(now); err != nil {
+		t.Fatal(err)
+	}
+	per := r.PerSession()
+
+	s1, ok := per["sess-1"] // key is the filename minus .jsonl == the session id
+	if !ok {
+		t.Fatal("sess-1 missing from PerSession")
+	}
+	if s1.Total != 420 {
+		t.Errorf("sess-1 Total = %d, want 420 (160 + 10 sidechain + 250; cache_read excluded)", s1.Total)
+	}
+	if s1.Context != 5230 {
+		t.Errorf("sess-1 Context = %d, want 5230 (last main-thread 200+5000+30; cache_read INCLUDED, output & sidechain excluded)", s1.Context)
+	}
+	if s2 := per["sess-2"]; s2.Total != 3 || s2.Context != 11 {
+		t.Errorf("sess-2 = %+v, want {Total:3 Context:11}", s2)
+	}
+}
+
+func TestPerSessionEmptyBeforeRefresh(t *testing.T) {
+	if r := NewReader(t.TempDir(), 0); len(r.PerSession()) != 0 {
+		t.Errorf("PerSession should be empty before the first Refresh")
+	}
+}

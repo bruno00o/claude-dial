@@ -49,6 +49,16 @@
   .ft .w{color:var(--hot);}
   @keyframes pulse{0%,100%{opacity:.6;} 50%{opacity:1;}}
 
+  /* rim: the 5h usage gauge — above the vignette so the edge stays visible */
+  .rim{position:absolute; inset:0; z-index:6; pointer-events:none;}
+  .rimlabel{position:absolute; top:15px; left:50%; transform:translateX(-50%); z-index:7;
+    font-size:10px; letter-spacing:.2em; color:var(--dim); text-transform:uppercase;
+    font-variant-numeric:tabular-nums; pointer-events:none;}
+  /* per-conversation cumulative tokens on a roster row */
+  .row .tok{font-size:10.5px; color:var(--dim); font-variant-numeric:tabular-nums; margin-left:6px;}
+  .row.sel .tok{color:var(--amber-hot);}
+  .p-usage{font-size:11px; color:var(--dim); font-variant-numeric:tabular-nums; margin:-8px 0 12px;}
+
   /* permission */
   .p-hd{display:flex; justify-content:space-between; align-items:baseline; font-size:13.5px; color:var(--amber); text-shadow:0 0 8px rgba(255,166,43,.5); padding-bottom:6px;}
   .p-hd .q{font-size:11px; color:var(--dim); text-shadow:none;}
@@ -95,6 +105,16 @@
   const view=()=>pending().length?"perm":(snap.sessions.length?"roster":"idle");
   const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
   const clock=()=>{const d=new Date();return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");};
+  // format a raw token count compactly: 216k, 1.2M. Empty for 0 (omitempty on the wire).
+  const ftok=n=>{ n=+n||0; if(n<=0)return""; if(n>=1e6)return (n/1e6).toFixed(n<1e7?1:0)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; };
+  const rimColor=p=>p>=85?"var(--red)":p>=70?"var(--amber-hot)":"var(--amber)";
+  // rim(pct): the 5h usage gauge as an arc from 12 o'clock, matching the firmware's
+  // amber→hot→red thresholds; labelled "5h" so it never reads as a context bar.
+  const rim=pct=>{ const p=Math.max(0,Math.min(100,Math.round(pct||0))), R=150, C=2*Math.PI*R, off=C*(1-p/100);
+    return `<svg class="rim" viewBox="0 0 320 320" width="320" height="320" aria-hidden="true">`
+      +`<circle cx="160" cy="160" r="${R}" fill="none" stroke="#231c10" stroke-width="4"/>`
+      +(p>0?`<circle cx="160" cy="160" r="${R}" fill="none" stroke="${rimColor(p)}" stroke-width="4" stroke-linecap="round" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 160 160)"/>`:``)
+      +`</svg><div class="rimlabel">5h${p>0?" · "+p+"%":""}</div>`; };
 
   async function decide(id,k){
     try{ await fetch("/decision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:id,decision:k})}); }catch(e){}
@@ -115,7 +135,7 @@
     const v=view();
     let inner;
     if(v==="idle"){
-      inner=`<div class="idle"><div class="clk">${clock()}</div><div class="sub">waiting for claude</div></div>`;
+      inner=rim(snap.usage_pct)+`<div class="idle"><div class="clk">${clock()}</div><div class="sub">waiting for claude</div></div>`;
     } else if(v==="roster"){
       const list=roster(); if(caret>=list.length) caret=0;
       const waits=list.filter(s=>s.state==="blocked"||s.state==="needs_input").length;
@@ -123,13 +143,16 @@
         const m=stMeta[s.state]||stMeta.idle;
         const g=m.g==="spin"?`<span class="spinner">⣾</span>`:m.g;
         const nm=esc(s.project||s.session_id.slice(0,10));
-        return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}"><span class="car">▸</span><span class="nm">${nm}</span><span class="st">${g} ${m.l}</span></div>`;
+        const tk=ftok(s.total_tokens);
+        return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}"><span class="car">▸</span><span class="nm">${nm}</span>${tk?`<span class="tok">${tk}</span>`:''}<span class="st">${g} ${m.l}</span></div>`;
       }).join("");
-      inner=`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n">${list.length}</span> agent${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div><div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div></div>`;
+      inner=rim(snap.usage_pct)+`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n">${list.length}</span> session${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div><div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div></div>`;
     } else {
       const q=pending(), p=q[0], behind=q.length-1;
       const opts=OPTS.map((o,i)=>`<div class="opt ${o.rej?'rej':''} ${i===opt?'sel':''}" data-opt="${i}"><span class="car">▸</span>${o.label}</div>`).join("");
-      inner=`<div class="body"><div class="p-hd"><span>${esc(p.project||p.session_id.slice(0,10))}</span><span class="q">${behind>0?'⟨'+behind+' more⟩':'last'}</span></div><div class="p-warn">⚠ permission required</div><div class="p-cmd">$ <span class="d">${esc((p.tool_name||'').toLowerCase())}</span> ${esc(p.command)}</div>${opts}<div class="p-ft">↻ choose · ⏎ confirm<span class="cur"></span></div></div>`;
+      const ctx=ftok(p.context_tokens), tot=ftok(p.total_tokens);
+      const usage=(ctx||tot)?`<div class="p-usage">${ctx?'ctx '+ctx:''}${ctx&&tot?' · ':''}${tot?tot+' total':''}</div>`:'';
+      inner=`<div class="body"><div class="p-hd"><span>${esc(p.project||p.session_id.slice(0,10))}</span><span class="q">${behind>0?'⟨'+behind+' more⟩':'last'}</span></div><div class="p-warn">⚠ permission required</div><div class="p-cmd">$ <span class="d">${esc((p.tool_name||'').toLowerCase())}</span> ${esc(p.command)}</div>${usage}${opts}<div class="p-ft">↻ choose · ⏎ confirm<span class="cur"></span></div></div>`;
     }
     el.innerHTML=`<div class="crt"></div><div class="vig"></div>`+inner;
     el.querySelectorAll(".row[data-i]").forEach(r=>r.onclick=e=>{e.stopPropagation(); caret=+r.dataset.i; render();});
