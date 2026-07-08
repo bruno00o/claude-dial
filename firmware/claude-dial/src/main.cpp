@@ -737,6 +737,23 @@ static uint32_t ctxColor(int pct) {
   return COL_AMBER;
 }
 
+// Night mode: auto-dim the backlight during night hours (22:00–07:00) so the
+// object isn't a lamp on the desk overnight. It only scales down whatever
+// brightness the user set — never brighter — and only once the bridge has set
+// the clock (otherwise the RTC hour can't be trusted).
+static const int NIGHT_START = 22, NIGHT_END = 7;
+static bool isNightHour() {
+  if (!hasEverConnected) return false;
+  int h = M5Dial.Rtc.getDateTime().time.hours;
+  return h >= NIGHT_START || h < NIGHT_END;   // window wraps midnight
+}
+static void applyBrightness() {
+  int b = brightness;
+  if (isNightHour()) b = b * 35 / 100;        // dim to ~35% at night
+  if (b < 8) b = 8;
+  M5Dial.Display.setBrightness((uint8_t)b);
+}
+
 // Gauge colour by how close the 5h window is to the cap: amber → hot → red.
 static uint32_t usageColor() {
   if (usagePct >= 85) return COL_RED;
@@ -1206,16 +1223,20 @@ static void drawPermission() {
     canvas.drawString(ctxLine, CX, 134);
   }
 
-  // choices — body size, caret ">" on the selected one
+  // choices — a filled AA pill on the selected one (red for reject), like the menu
   useS();
+  canvas.setTextDatum(middle_center);
   int btnY[3] = { 156, 180, 204 };
   for (int i = 0; i < 3; i++) {
     bool sel = (i == permChoice);
-    uint32_t col = !sel ? COL_GRAY : (i == 2 ? COL_RED : COL_AMBER);
-    char row[20];
-    snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", choiceLabels[i]);
-    canvas.setTextColor(col, COL_BG);
-    canvas.drawString(row, CX, btnY[i]);
+    if (sel) {
+      uint32_t pill = (i == 2) ? COL_RED : COL_AMBER;
+      canvas.fillSmoothRoundRect(CX - 78, btnY[i] - 11, 156, 22, 11, pill);
+      canvas.setTextColor(COL_BG, pill);      // text blends to the pill, not the bg
+    } else {
+      canvas.setTextColor(COL_GRAY, COL_BG);
+    }
+    canvas.drawString(choiceLabels[i], CX, btnY[i]);
   }
   canvas.pushSprite(0, 0);
 }
@@ -1671,7 +1692,7 @@ static void handleEncoder(int delta) {
       if (b < 20)  b = 20;
       if (b > 255) b = 255;
       brightness = (uint8_t)b;
-      M5Dial.Display.setBrightness(brightness);
+      applyBrightness();   // honor night dim while adjusting
       needsRedraw = true;
       break;
     }
@@ -1903,6 +1924,7 @@ void setup() {
   canvas.drawString("claude-dial", CX, CY);
   canvas.pushSprite(0, 0);
   for (int b = 0; b <= brightness; b += 8) { M5Dial.Display.setBrightness(b); delay(12); }
+  applyBrightness();   // settle to the night-dimmed level if it's night
 
   M5Dial.Rtc.begin();
   memset(sessions, 0, sizeof(sessions));
@@ -2078,7 +2100,8 @@ void loop() {
 
   // Periodic redraws: idle clock (10s), permission countdown arc (1s), and the
   // roster spinner (~150ms, only while a session is "working").
-  static unsigned long lastSlow = 0, lastFast = 0;
+  static unsigned long lastSlow = 0, lastFast = 0, lastNight = 0;
+  if (millis() - lastNight > 30000) { lastNight = millis(); applyBrightness(); }  // night auto-dim
   if (appState == IDLE && millis() - lastSlow > 10000) {
     lastSlow = millis(); needsRedraw = true;
   }
