@@ -493,6 +493,7 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 				ContextTokens: s.ContextTokens, // token drift alone never triggers a BLE write
 				ContextPct:    s.ContextPct,
 				SubAgents:     s.SubAgents,
+				CostUSD:       s.CostUSD,
 			}) {
 				d.mu.Lock()
 				d.last[s.SessionID] = s

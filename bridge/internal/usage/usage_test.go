@@ -175,6 +175,28 @@ func TestPerSessionUsage(t *testing.T) {
 	}
 }
 
+func TestPerSessionCost(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	// One Sonnet turn ($3/$15 per 1M): input 1000, output 2000, cache_create 400,
+	// cache_read 10000. billedInput = 1000 + 400*1.25 + 10000*0.1 = 2500.
+	// cost = (2500*3 + 2000*15)/1e6 = (7500 + 30000)/1e6 = 0.0375
+	writeLines(t, dir, "sess.jsonl", []map[string]any{{
+		"type": "assistant", "timestamp": now.Add(-time.Minute).UTC().Format(time.RFC3339Nano),
+		"message": map[string]any{"role": "assistant", "model": "claude-sonnet-4-6",
+			"usage": map[string]any{"input_tokens": 1000, "output_tokens": 2000,
+				"cache_creation_input_tokens": 400, "cache_read_input_tokens": 10000}},
+	}})
+	r := NewReader(dir, 0)
+	if err := r.Refresh(now); err != nil {
+		t.Fatal(err)
+	}
+	got := r.PerSession()["sess"].Cost
+	if want := 0.0375; got < want-1e-9 || got > want+1e-9 {
+		t.Errorf("Cost = %v, want %v (Sonnet pricing with cache multipliers)", got, want)
+	}
+}
+
 func TestPerSessionEmptyBeforeRefresh(t *testing.T) {
 	if r := NewReader(t.TempDir(), 0); len(r.PerSession()) != 0 {
 		t.Errorf("PerSession should be empty before the first Refresh")

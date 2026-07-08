@@ -48,10 +48,11 @@ type SessionView struct {
 	// not carried in the transcript, and 1M-context variants share the base
 	// model id), so we surface honest counts and let the reader judge. Omitted
 	// (zero) when the daemon has no usage for the session yet.
-	TotalTokens   int64 `json:"total_tokens,omitempty"`   // cumulative "work" tokens spent (input+output+cache_creation)
-	ContextTokens int64 `json:"context_tokens,omitempty"` // tokens resident in the context window right now
-	ContextPct    int   `json:"context_pct,omitempty"`    // ContextTokens as a % of the model's max context (for the rim)
-	SubAgents     int   `json:"sub_agents,omitempty"`     // Task sub-agents this conversation has spawned
+	TotalTokens   int64   `json:"total_tokens,omitempty"`   // cumulative "work" tokens spent (input+output+cache_creation)
+	ContextTokens int64   `json:"context_tokens,omitempty"` // tokens resident in the context window right now
+	ContextPct    int     `json:"context_pct,omitempty"`    // ContextTokens as a % of the model's max context (for the rim)
+	SubAgents     int     `json:"sub_agents,omitempty"`     // Task sub-agents this conversation has spawned
+	CostUSD       float64 `json:"cost_usd,omitempty"`       // cumulative USD cost for this conversation (ccusage-style)
 }
 
 // Snapshot is the full state pushed to a Device on every change.
@@ -72,10 +73,11 @@ type Outbound struct {
 	Command   string `json:"command,omitempty"`
 
 	// Per-conversation usage (see SessionView). Raw token counts, not a gauge.
-	TotalTokens   int64 `json:"total_tokens,omitempty"`
-	ContextTokens int64 `json:"context_tokens,omitempty"`
-	ContextPct    int   `json:"context_pct,omitempty"`
-	SubAgents     int   `json:"sub_agents,omitempty"`
+	TotalTokens   int64   `json:"total_tokens,omitempty"`
+	ContextTokens int64   `json:"context_tokens,omitempty"`
+	ContextPct    int     `json:"context_pct,omitempty"`
+	SubAgents     int     `json:"sub_agents,omitempty"`
+	CostUSD       float64 `json:"cost_usd,omitempty"`
 
 	// control messages: {"type":"set_time","epoch":…,"tz_offset":…,"host":"…"},
 	// {"type":"ota_available","version":"0.6.0"} (empty version clears the prompt),

@@ -188,6 +188,7 @@ func (d *Daemon) enrichedSessions() []protocol.SessionView {
 		sessions[i].TotalTokens = u.Total
 		sessions[i].ContextTokens = u.Context
 		sessions[i].SubAgents = u.SubAgents
+		sessions[i].CostUSD = u.Cost
 		// Context as a % of the model's max context — the rim's gauge.
 		if d.contextMax > 0 {
 			pct := int(u.Context * 100 / d.contextMax)

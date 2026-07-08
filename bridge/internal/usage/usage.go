@@ -47,9 +47,27 @@ func (s Stats) Pct() int { return int(s.Fraction*100 + 0.5) }
 
 // SessionUsage is per-conversation usage derived from a single transcript file.
 type SessionUsage struct {
-	Total     int64 // cumulative "work" tokens (input+output+cache_creation) over all turns
-	Context   int64 // tokens resident in the context window at the last main-thread assistant turn
-	SubAgents int   // Task sub-agents spawned (count of Task tool_use blocks in the transcript)
+	Total     int64   // cumulative "work" tokens (input+output+cache_creation) over all turns
+	Context   int64   // tokens resident in the context window at the last main-thread assistant turn
+	SubAgents int     // Task sub-agents spawned (count of Task tool_use blocks in the transcript)
+	Cost      float64 // cumulative USD cost for this conversation (ccusage-style, all turns)
+}
+
+// modelPriceUSD returns (inputPerM, outputPerM) in USD per 1M tokens for a model,
+// matched by family so it survives version bumps. Cache writes bill at 1.25x the
+// input rate, cache reads at 0.1x (the standard Anthropic multipliers, applied in
+// lineUsage.costUSD). Unknown models fall back to Sonnet-tier pricing.
+func modelPriceUSD(model string) (in, out float64) {
+	switch {
+	case strings.Contains(model, "opus"):
+		return 5, 25
+	case strings.Contains(model, "haiku"):
+		return 1, 5
+	case strings.Contains(model, "fable"), strings.Contains(model, "mythos"):
+		return 10, 50
+	default: // sonnet and anything unrecognized
+		return 3, 15
+	}
 }
 
 // Reader scans the transcript dir and keeps the latest Stats.
@@ -198,6 +216,7 @@ type lineUsage struct {
 	Type        string    `json:"type"`        // "assistant", "user", …
 	IsSidechain bool      `json:"isSidechain"` // true for Task sub-agent turns
 	Message     struct {
+		Model string `json:"model"` // e.g. "claude-sonnet-4-6" — for cost pricing
 		Usage struct {
 			Input       int64 `json:"input_tokens"`
 			Output      int64 `json:"output_tokens"`
@@ -250,6 +269,15 @@ func (l lineUsage) residentContextTokens() int64 {
 	return l.Message.Usage.Input + l.Message.Usage.CacheRead + l.Message.Usage.CacheCreate
 }
 
+// costUSD prices one turn the ccusage way: input + cache_creation×1.25 +
+// cache_read×0.1 at the model's input rate, plus output at its output rate.
+func (l lineUsage) costUSD() float64 {
+	inRate, outRate := modelPriceUSD(l.Message.Model)
+	u := l.Message.Usage
+	billedInput := float64(u.Input) + float64(u.CacheCreate)*1.25 + float64(u.CacheRead)*0.1
+	return (billedInput*inRate + float64(u.Output)*outRate) / 1_000_000
+}
+
 // scanFile reads one transcript once and returns (a) the in-window quota events
 // appended to events — identical to the old behaviour — and (b) the whole file's
 // per-conversation SessionUsage.
@@ -278,6 +306,7 @@ func scanFile(events []event, path string, since time.Time) ([]event, SessionUsa
 				// whole file (window-independent). Sub-agent (sidechain) turns are
 				// real spend, so they count here.
 				su.Total += work
+				su.Cost += l.costUSD()
 				// Context fill: the LAST main-thread assistant turn's resident input.
 				// Skip sidechain turns — a sub-agent's context is not this
 				// conversation's — and overwrite so the final value wins.
