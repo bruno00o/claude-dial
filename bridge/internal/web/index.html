@@ -141,7 +141,8 @@
       const waits=list.filter(s=>s.state==="blocked"||s.state==="needs_input").length;
       const rows=list.map((s,i)=>{
         const m=stMeta[s.state]||stMeta.idle;
-        const g=m.g==="spin"?`<span class="spinner">⣾</span>`:m.g;
+        let g=m.g==="spin"?`<span class="spinner">⣾</span>`:m.g;
+        if(s.errored) g=`<span style="color:#ff5555">${g}</span>`;   // error sniffer: red glyph
         const nm=esc(s.project||s.session_id.slice(0,10));
         const tk=ftok(s.total_tokens);
         return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}"><span class="car">▸</span><span class="nm">${nm}</span>${tk?`<span class="tok">${tk}</span>`:''}<span class="st">${g} ${m.l}</span></div>`;
@@ -151,7 +152,9 @@
       const q=pending(), p=q[0], behind=q.length-1;
       const opts=OPTS.map((o,i)=>`<div class="opt ${o.rej?'rej':''} ${i===opt?'sel':''}" data-opt="${i}"><span class="car">▸</span>${o.label}</div>`).join("");
       const ctx=ftok(p.context_tokens), tot=ftok(p.total_tokens);
-      const usage=(ctx||tot)?`<div class="p-usage">${ctx?'ctx '+ctx:''}${ctx&&tot?' · ':''}${tot?tot+' total':''}</div>`:'';
+      const parts=[]; if(ctx)parts.push('ctx '+ctx); if(tot)parts.push(tot+' total');
+      if(p.cost_usd)parts.push('$'+(+p.cost_usd).toFixed(2)); if(p.model)parts.push(esc(p.model));
+      const usage=parts.length?`<div class="p-usage">${parts.join(' · ')}</div>`:'';
       inner=`<div class="body"><div class="p-hd"><span>${esc(p.project||p.session_id.slice(0,10))}</span><span class="q">${behind>0?'⟨'+behind+' more⟩':'last'}</span></div><div class="p-warn">⚠ permission required</div><div class="p-cmd">$ <span class="d">${esc((p.tool_name||'').toLowerCase())}</span> ${esc(p.command)}</div>${usage}${opts}<div class="p-ft">↻ choose · ⏎ confirm<span class="cur"></span></div></div>`;
     }
     el.innerHTML=`<div class="crt"></div><div class="vig"></div>`+inner;
