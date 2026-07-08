@@ -623,7 +623,7 @@ static void fmtTokens(long v, char* out, size_t n) {
 static void drawBase() {
   canvas.fillScreen(COL_BG);
   canvas.fillCircle(CX, CY, CR - 1, COL_BG);
-  canvas.drawCircle(CX, CY, CR - 1, COL_RING);   // dim bezel only — no CRT gloss
+  canvas.fillArc(CX, CY, CR - 3, CR - 1, 0, 360, COL_RING);   // smooth AA bezel
 }
 
 // ── Round-screen text fitting ──────────────────────────────────────────────
@@ -669,6 +669,22 @@ static void drawDotRing(float frac, uint32_t on, uint32_t off, int count, int ra
   }
 }
 
+// Bold usage ring: a thick solid band from 12 o'clock clockwise — `frac` in `on`,
+// the rest in `off`. Same proven angle math as drawDotRing (0deg = top, clockwise)
+// but drawn as dense radial ticks so it reads as one solid arc, like the web rim.
+static void drawUsageArcBold(float frac, uint32_t on, uint32_t off) {
+  if (frac < 0) frac = 0;
+  if (frac > 1) frac = 1;
+  const int r0 = CR - 11, r1 = CR - 4;              // 7px band near the edge
+  // Anti-aliased ring via fillArc. Convention (fill_arc_helper, LGFXBase.cpp):
+  // 0deg = 3 o'clock, -90 = 12 o'clock, angle increases CLOCKWISE. So fill from
+  // the top clockwise. One AA call replaces 360 aliased radial ticks — smoother
+  // AND cheaper. (If a flash ever shows it running CCW, swap to 270-360*frac..270.)
+  canvas.fillArc(CX, CY, r0, r1, -90.0f, 270.0f, off);              // full dim track
+  if (frac > 0.0001f)
+    canvas.fillArc(CX, CY, r0, r1, -90.0f, -90.0f + frac * 360.0f, on);
+}
+
 // Gauge colour by how close the 5h window is to the cap: amber → hot → red.
 static uint32_t usageColor() {
   if (usagePct >= 85) return COL_RED;
@@ -685,12 +701,13 @@ static void getTimeStr(char* tBuf, char* dBuf) {
 static void drawIdle() {
   drawBase();
   // Rim gauge: fills with the 5h usage window (all-dim ambient bezel at 0%).
-  drawDotRing(usagePct / 100.0f, usageColor(), COL_ARC_OFF, 60, CR - 8);
+  drawUsageArcBold(usagePct / 100.0f, usageColor(), COL_ARC_OFF);   // smooth AA ring
   if (usagePct > 0) {   // label the rim so it isn't mistaken for a context gauge
     canvas.setFont(&fonts::FreeMono9pt7b);
     canvas.setTextDatum(middle_center);
     canvas.setTextColor(COL_DIM, COL_BG);
-    canvas.drawString("5h", CX, 16);
+    char rimLbl[12]; snprintf(rimLbl, sizeof(rimLbl), "5h %d%%", usagePct);
+    canvas.drawString(rimLbl, CX, 30);
   }
 
   // Fresh out of the box: never paired since boot. Show how to set up the Mac
@@ -766,12 +783,13 @@ static int sessionRank(const Session& s) {
 
 static void drawSessionList() {
   drawBase();
-  drawDotRing(usagePct / 100.0f, usageColor(), COL_ARC_OFF, 60, CR - 8);   // usage gauge on the rim
+  drawUsageArcBold(usagePct / 100.0f, usageColor(), COL_ARC_OFF);   // bold usage ring (5h window)
   if (usagePct > 0) {   // anchor the rim's meaning so it never reads as "context"
     canvas.setFont(&fonts::FreeMono9pt7b);
     canvas.setTextDatum(middle_center);
     canvas.setTextColor(COL_DIM, COL_BG);
-    canvas.drawString("5h", CX, 16);
+    char rimLbl[12]; snprintf(rimLbl, sizeof(rimLbl), "5h %d%%", usagePct);
+    canvas.drawString(rimLbl, CX, 30);   // clear of the thick rim band
   }
 
   int active[MAX_SESSIONS], n = 0, waits = 0;
@@ -790,15 +808,22 @@ static void drawSessionList() {
     active[j + 1] = v;
   }
 
-  // header — "N agents" (dim, small)
+  // header — masthead like the web roster: count (amber) + "session(s)" (dim) on
+  // the left, the clock (dim) on the right, with a hairline rule beneath. "claude ›"
+  // is dropped: the round chord can't hold branding + clock on one line.
   canvas.setFont(&fonts::FreeMono9pt7b);
-  canvas.setTextDatum(middle_center);
+  const int hy = 50, hcw = canvas.textWidth("0");
+  char cnt[8]; snprintf(cnt, sizeof(cnt), "%d", n);
+  canvas.setTextDatum(middle_left);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.drawString(cnt, CX - 88, hy);
   canvas.setTextColor(COL_DIM, COL_BG);
-  // Just the session count — the rim owns the 5h % (it used to be printed here
-  // too, which read as a per-session figure next to the count).
-  char hdr[24];
-  snprintf(hdr, sizeof(hdr), "%d session%s", n, n == 1 ? "" : "s");
-  canvas.drawString(hdr, CX, 36);
+  canvas.drawString(n == 1 ? " session" : " sessions", CX - 88 + (int)strlen(cnt) * hcw, hy);
+  char tb[8]; { auto dt = M5Dial.Rtc.getDateTime(); snprintf(tb, sizeof(tb), "%02d:%02d", dt.time.hours, dt.time.minutes); }
+  canvas.setTextDatum(middle_right);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString(tb, CX + 88, hy);
+  canvas.drawFastHLine(CX - 84, hy + 14, 168, COL_RING);
 
   if (n == 0) {                 // no agents — the daemon switches us back to the clock
     canvas.pushSprite(0, 0);
@@ -839,19 +864,36 @@ static void drawSessionList() {
       col = dimColor(col, f, 255);
     }
 
-    char label[16], lf[20];
+    // per-conversation total tokens, right-aligned + dim (mirrors the web roster)
+    char tok[12] = "";
+    if (s.total_tokens > 0) fmtTokens(s.total_tokens, tok, sizeof(tok));
+    int cw = canvas.textWidth("0"); if (cw < 1) cw = 1;
+    const int tokRight = CX + 86;                    // right anchor, inside the chord on every row
+    int labelRight = tok[0] ? tokRight - (int)strlen(tok) * cw - 8 : CX + 90;
+
+    // project label, clipped to stop before the token column (round-screen room)
+    char label[24], lf[24];
     sessionLabel(s, label, sizeof(label));
-    fitChord(label, lf, sizeof(lf), CX - 70, y, 'L');   // clip to the row's chord
+    int maxN = (labelRight - (CX - 70)) / cw; if (maxN < 1) maxN = 1;
+    if ((size_t)maxN + 1 > sizeof(lf)) maxN = (int)sizeof(lf) - 1;
+    strlcpy(lf, label, (size_t)maxN + 1);
 
     canvas.setTextColor(col, COL_BG);
     canvas.setTextDatum(middle_left);
     if (waiting) {                                   // needs-you: a hot filled triangle
       canvas.fillTriangle(CX - 90, y - 5, CX - 90, y + 5, CX - 82, y, col);
-    } else {                                         // working: spinner · idle: a dot
-      char glyph[2] = { working ? SPINNER[spinFrame] : '.', 0 };
-      canvas.drawString(glyph, CX - 88, y);
+    } else if (working) {                            // working: a smooth spinning C-arc
+      int base = spinFrame * 90;                       // advances each 150ms tick
+      canvas.fillArc(CX - 88, y, 3, 6, base, base + 270, col);
+    } else {                                          // idle: a soft AA dot
+      canvas.fillSmoothCircle(CX - 88, y, 2, col);
     }
     canvas.drawString(lf, CX - 70, y);
+    if (tok[0]) {                                    // dim per-conversation token count
+      canvas.setTextDatum(middle_right);
+      canvas.setTextColor(COL_DIM, COL_BG);
+      canvas.drawString(tok, tokRight, y);
+    }
   }
 
   // footer — only shown when something actually needs you; silence otherwise
