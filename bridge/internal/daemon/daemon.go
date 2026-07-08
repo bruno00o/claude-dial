@@ -59,6 +59,10 @@ type Daemon struct {
 	// it must never flash firmware newer than itself (that firmware could expect
 	// messages this bridge doesn't send yet); we only offer/flash up to it.
 	bridgeVersion string
+
+	// contextMax is the model's max context window (tokens), the denominator for
+	// the per-session context gauge on the rim. Defaults to 1M.
+	contextMax int64
 }
 
 // Config tunes the daemon.
@@ -98,6 +102,9 @@ type Config struct {
 	// (empty → ~/.claude/projects).
 	UsageBudgetTokens int64
 	UsageDir          string
+	// ContextMax is the model's max context window (tokens) — the denominator for
+	// the per-session context gauge shown on the Dial's rim. 0 defaults to 1M.
+	ContextMax int64
 	// Debug logs every hook event received.
 	Debug bool
 }
@@ -116,6 +123,9 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 	if cfg.ForgetAfter <= 0 {
 		cfg.ForgetAfter = time.Hour
 	}
+	if cfg.ContextMax <= 0 {
+		cfg.ContextMax = 1_000_000 // 1M-context models (the current default)
+	}
 	d := &Daemon{
 		store:         store,
 		dev:           dev,
@@ -126,6 +136,7 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 		fw:            firmware.NewChecker(cfg.FirmwareManifestURL),
 		usage:         usage.NewReader(cfg.UsageDir, cfg.UsageBudgetTokens),
 		bridgeVersion: cfg.BridgeVersion,
+		contextMax:    cfg.ContextMax,
 	}
 	go d.dispatch()
 	go d.sweep(cfg.IdleAfter, cfg.BlockedIdleAfter, cfg.ForgetAfter)
@@ -159,21 +170,40 @@ func (d *Daemon) dispatch() {
 	}
 }
 
-// broadcast renders the current store to the device, enriching each session with
-// its per-conversation usage. The usage reader keys transcripts by session id
-// (the filename), so this is an exact join onto the sessions we already track.
-func (d *Daemon) broadcast() {
+// enrichedSessions returns the prioritized roster with each session joined to its
+// per-conversation usage (tokens, context %, sub-agents). The usage reader keys
+// transcripts by session id (the filename), so this is an exact join onto the
+// sessions we already track. Shared by broadcast() (to the device) and /status.
+func (d *Daemon) enrichedSessions() []protocol.SessionView {
 	sessions := prioritize(disambiguate(d.store.Snapshot()))
-	if per := d.usage.PerSession(); len(per) > 0 {
-		for i := range sessions {
-			if u, ok := per[sessions[i].SessionID]; ok {
-				sessions[i].TotalTokens = u.Total
-				sessions[i].ContextTokens = u.Context
+	per := d.usage.PerSession()
+	if len(per) == 0 {
+		return sessions
+	}
+	for i := range sessions {
+		u, ok := per[sessions[i].SessionID]
+		if !ok {
+			continue
+		}
+		sessions[i].TotalTokens = u.Total
+		sessions[i].ContextTokens = u.Context
+		sessions[i].SubAgents = u.SubAgents
+		// Context as a % of the model's max context — the rim's gauge.
+		if d.contextMax > 0 {
+			pct := int(u.Context * 100 / d.contextMax)
+			if pct > 100 {
+				pct = 100
 			}
+			sessions[i].ContextPct = pct
 		}
 	}
+	return sessions
+}
+
+// broadcast renders the current (enriched) store to the device.
+func (d *Daemon) broadcast() {
 	d.dev.Update(protocol.Snapshot{
-		Sessions: sessions,
+		Sessions: d.enrichedSessions(),
 		UsagePct: d.usage.Latest().Pct(),
 	})
 }

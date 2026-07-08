@@ -47,8 +47,9 @@ func (s Stats) Pct() int { return int(s.Fraction*100 + 0.5) }
 
 // SessionUsage is per-conversation usage derived from a single transcript file.
 type SessionUsage struct {
-	Total   int64 // cumulative "work" tokens (input+output+cache_creation) over all turns
-	Context int64 // tokens resident in the context window at the last main-thread assistant turn
+	Total     int64 // cumulative "work" tokens (input+output+cache_creation) over all turns
+	Context   int64 // tokens resident in the context window at the last main-thread assistant turn
+	SubAgents int   // Task sub-agents spawned (count of Task tool_use blocks in the transcript)
 }
 
 // Reader scans the transcript dir and keeps the latest Stats.
@@ -203,7 +204,33 @@ type lineUsage struct {
 			CacheCreate int64 `json:"cache_creation_input_tokens"`
 			CacheRead   int64 `json:"cache_read_input_tokens"`
 		} `json:"usage"`
+		// Content is a string (user turns) or an array of blocks (assistant turns);
+		// RawMessage captures either without failing the token parse.
+		Content json.RawMessage `json:"content"`
 	} `json:"message"`
+}
+
+// countTaskBlocks counts Task tool_use blocks in an assistant turn's content — one
+// per sub-agent this turn spawned. Content that isn't a JSON array (user string
+// turns) yields 0, so it never disturbs token parsing.
+func countTaskBlocks(content json.RawMessage) int {
+	if len(content) == 0 || content[0] != '[' {
+		return 0
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return 0
+	}
+	n := 0
+	for _, b := range blocks {
+		if b.Type == "tool_use" && b.Name == "Task" {
+			n++
+		}
+	}
+	return n
 }
 
 // workTokens is what the 5h QUOTA gauge (and cumulative per-conversation spend)
@@ -258,6 +285,8 @@ func scanFile(events []event, path string, since time.Time) ([]event, SessionUsa
 					if c := l.residentContextTokens(); c > 0 {
 						su.Context = c
 					}
+					// Sub-agents are launched from the main thread via the Task tool.
+					su.SubAgents += countTaskBlocks(l.Message.Content)
 				}
 			}
 		}

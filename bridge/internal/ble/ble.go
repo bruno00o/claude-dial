@@ -262,6 +262,12 @@ func (d *Device) onNotify(buf []byte) {
 			d.mu.Lock()
 			d.firmware = hello.Firmware
 			d.otaCapable = hello.OTA
+			// A hello means the Dial just (re)booted with an empty session list —
+			// e.g. after a firmware flash. Forget what we think it shows so the next
+			// flush resends every session, instead of leaving it stuck on the idle
+			// screen because our diff says "nothing changed".
+			d.last = map[string]protocol.SessionView{}
+			d.lastUsagePct = -1
 			d.mu.Unlock()
 			d.logf("dial firmware %s (ota=%v)", hello.Firmware, hello.OTA)
 		}
@@ -485,6 +491,8 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 				Command:       s.Command,
 				TotalTokens:   s.TotalTokens,   // piggybacked: not in displayEqual, so
 				ContextTokens: s.ContextTokens, // token drift alone never triggers a BLE write
+				ContextPct:    s.ContextPct,
+				SubAgents:     s.SubAgents,
 			}) {
 				d.mu.Lock()
 				d.last[s.SessionID] = s

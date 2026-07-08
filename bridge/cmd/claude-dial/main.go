@@ -89,6 +89,7 @@ func cmdServe(args []string) {
 	idleAfter := fs.Duration("idle-after", 90*time.Second, "demote a silent working session to idle after this long")
 	useBLE := fs.Bool("ble", false, "also drive a physical M5Stack Dial over BLE")
 	usageBudget := fs.Int64("usage-budget", 0, "token budget for the 5h usage gauge (0 = auto-calibrate to your heaviest recent 5h)")
+	contextMax := fs.Int64("context-max", 1_000_000, "model max context window in tokens — the rim shows a session's context as a fraction of this")
 	debug := fs.Bool("debug", false, "log every hook event received")
 	_ = fs.Parse(args)
 
@@ -110,7 +111,7 @@ func cmdServe(args []string) {
 		}
 	}
 
-	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), BridgeVersion: version, UsageBudgetTokens: *usageBudget, Debug: *debug})
+	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), BridgeVersion: version, UsageBudgetTokens: *usageBudget, ContextMax: *contextMax, Debug: *debug})
 
 	mux := http.NewServeMux()
 	hub.RegisterRoutes(mux)

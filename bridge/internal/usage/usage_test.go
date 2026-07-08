@@ -180,3 +180,45 @@ func TestPerSessionEmptyBeforeRefresh(t *testing.T) {
 		t.Errorf("PerSession should be empty before the first Refresh")
 	}
 }
+
+// asstWithContent is an assistant line whose message.content carries the given
+// blocks (e.g. Task tool_use), so we can exercise sub-agent counting.
+func asstWithContent(ts time.Time, blocks []map[string]any) map[string]any {
+	return map[string]any{
+		"type": "assistant", "isSidechain": false,
+		"timestamp": ts.UTC().Format(time.RFC3339Nano),
+		"message": map[string]any{
+			"role": "assistant", "content": blocks,
+			"usage": map[string]any{"input_tokens": 10, "output_tokens": 5},
+		},
+	}
+}
+
+func TestSubAgentCount(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	writeLines(t, dir, "s.jsonl", []map[string]any{
+		// a user turn whose content is a plain STRING — must not break parsing
+		{"type": "user", "timestamp": now.Add(-9 * time.Minute).UTC().Format(time.RFC3339Nano),
+			"message": map[string]any{"role": "user", "content": "go do the thing"}},
+		// an assistant turn that spawns two sub-agents in one turn
+		asstWithContent(now.Add(-8*time.Minute), []map[string]any{
+			{"type": "text", "text": "spawning"},
+			{"type": "tool_use", "name": "Task", "input": map[string]any{"subagent_type": "explorer"}},
+			{"type": "tool_use", "name": "Task", "input": map[string]any{"subagent_type": "coder"}},
+		}),
+		// another turn, one more sub-agent + an unrelated tool
+		asstWithContent(now.Add(-5*time.Minute), []map[string]any{
+			{"type": "tool_use", "name": "Bash", "input": map[string]any{"command": "ls"}},
+			{"type": "tool_use", "name": "Task", "input": map[string]any{"subagent_type": "reviewer"}},
+		}),
+	})
+
+	r := NewReader(dir, 0)
+	if err := r.Refresh(now); err != nil {
+		t.Fatal(err)
+	}
+	if got := r.PerSession()["s"].SubAgents; got != 3 {
+		t.Errorf("SubAgents = %d, want 3 (Task blocks; string content must not break parsing)", got)
+	}
+}

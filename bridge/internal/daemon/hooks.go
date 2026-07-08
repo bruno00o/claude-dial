@@ -190,7 +190,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"connected": d.dev.Connected(),
-		"sessions":  d.store.Snapshot(),
+		"sessions":  d.enrichedSessions(),
 		"usage": map[string]any{
 			"pct":    u.Pct(),
 			"tokens": u.Tokens,

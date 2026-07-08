@@ -50,6 +50,8 @@ type SessionView struct {
 	// (zero) when the daemon has no usage for the session yet.
 	TotalTokens   int64 `json:"total_tokens,omitempty"`   // cumulative "work" tokens spent (input+output+cache_creation)
 	ContextTokens int64 `json:"context_tokens,omitempty"` // tokens resident in the context window right now
+	ContextPct    int   `json:"context_pct,omitempty"`    // ContextTokens as a % of the model's max context (for the rim)
+	SubAgents     int   `json:"sub_agents,omitempty"`     // Task sub-agents this conversation has spawned
 }
 
 // Snapshot is the full state pushed to a Device on every change.
@@ -72,6 +74,8 @@ type Outbound struct {
 	// Per-conversation usage (see SessionView). Raw token counts, not a gauge.
 	TotalTokens   int64 `json:"total_tokens,omitempty"`
 	ContextTokens int64 `json:"context_tokens,omitempty"`
+	ContextPct    int   `json:"context_pct,omitempty"`
+	SubAgents     int   `json:"sub_agents,omitempty"`
 
 	// control messages: {"type":"set_time","epoch":…,"tz_offset":…,"host":"…"},
 	// {"type":"ota_available","version":"0.6.0"} (empty version clears the prompt),
