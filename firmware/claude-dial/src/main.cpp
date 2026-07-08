@@ -108,6 +108,7 @@ struct Session {
   long  context_tokens; // tokens resident in the context window now (0 = unknown)
   int   context_pct;    // context as a % of the model max (for the rim, 0 = unknown)
   int   sub_agents;     // Task sub-agents this conversation has spawned
+  float cost_usd;       // cumulative USD cost for this conversation
   bool  active;
 };
 
@@ -520,6 +521,7 @@ static void handleRxMessage(const char* data, uint16_t len) {
   sessions[idx].context_tokens = doc["context_tokens"] | 0L;
   sessions[idx].context_pct    = doc["context_pct"]    | 0;
   sessions[idx].sub_agents     = doc["sub_agents"]     | 0;
+  sessions[idx].cost_usd       = doc["cost_usd"]       | 0.0f;
 
   if (strcmp(state, "permission_request") == 0) {
     bool isNew = !permInQueue(sid) && strcmp(currentPermSid, sid) != 0;
@@ -1037,21 +1039,23 @@ static void drawDetail() {
   canvas.setTextColor(stCol, COL_BG);
   canvas.drawString(stf, CX, 72);
 
-  canvas.drawFastHLine(CX - 74, 90, 148, COL_RING);
+  canvas.drawFastHLine(CX - 74, 88, 148, COL_RING);
 
-  // stats
-  char cbuf[16], tbuf[16], abuf[12];
+  // stats: context / total tokens / dollar cost / sub-agents
+  char cbuf[16], tbuf[16], dbuf[16], abuf[12];
   if (s.context_tokens > 0) fmtTokens(s.context_tokens, cbuf, sizeof(cbuf)); else strlcpy(cbuf, "-", sizeof(cbuf));
   if (s.total_tokens   > 0) fmtTokens(s.total_tokens,   tbuf, sizeof(tbuf)); else strlcpy(tbuf, "-", sizeof(tbuf));
+  if (s.cost_usd > 0)       snprintf(dbuf, sizeof(dbuf), "$%.2f", s.cost_usd); else strlcpy(dbuf, "-", sizeof(dbuf));
   snprintf(abuf, sizeof(abuf), "%d", s.sub_agents);
-  detailStat(110, "context", cbuf, COL_INK);
-  detailStat(134, "total",   tbuf, COL_INK);
-  detailStat(158, "agents",  abuf, s.sub_agents > 0 ? COL_AMBER : COL_GRAY);
+  detailStat(106, "context", cbuf, COL_INK);
+  detailStat(128, "total",   tbuf, COL_INK);
+  detailStat(150, "cost",    dbuf, COL_AMBER_HOT);
+  detailStat(172, "agents",  abuf, s.sub_agents > 0 ? COL_AMBER : COL_GRAY);
 
   useS();
   canvas.setTextDatum(middle_center);
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("press: back", CX, 198);
+  canvas.drawString("press: back", CX, 200);
   canvas.pushSprite(0, 0);
 }
 
@@ -1320,7 +1324,7 @@ static void drawModeMenu() {
   for (int i = 0; i < MENU_N; i++) {
     bool sel = (i == menuChoice);
     int  y   = CY - (MENU_N - 1) * (MENU_GAP / 2) + i * MENU_GAP;   // vertically centered
-    if (sel) canvas.fillRoundRect(CX - 76, y - 11, 152, 22, 6, COL_AMBER);  // TUI highlight bar
+    if (sel) canvas.fillSmoothRoundRect(CX - 78, y - 12, 156, 24, 11, COL_AMBER);  // AA selection pill
     uint32_t fg = sel ? COL_BG : COL_GRAY;
     drawMenuIcon(i, CX - 58, y, fg);
     canvas.setTextColor(fg, sel ? COL_AMBER : COL_BG);   // opaque text over the pill
