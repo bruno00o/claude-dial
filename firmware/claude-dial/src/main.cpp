@@ -96,7 +96,7 @@ static inline void useL();
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, DETAIL, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION, RESET_CONFIRM, GLOBAL_STATS };
+enum AppState { IDLE, SESSION_LIST, DETAIL, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION, RESET_CONFIRM, GLOBAL_STATS, HISTORY };
 
 struct Session {
   char  session_id[40];
@@ -164,6 +164,8 @@ static void drawIdle();
 static void drawSessionList();
 static void drawDetail();
 static void drawGlobalStats();
+static void drawHistory();
+static void drawTracked(const char* s, int cx, int y, int extra);
 static void drawPermission();
 static void drawConfirming();
 static void drawModeMenu();
@@ -182,6 +184,20 @@ static AppState appState = IDLE;
 
 static Session sessions[MAX_SESSIONS];
 static int     sessionCount = 0;
+
+// Recently-finished conversations, newest first — captured as each session ends
+// so the "recent" screen can show what's done (a RAM ring; clears on reboot).
+struct HistEntry {
+  char  project[28];
+  long  total_tokens;
+  float cost_usd;
+  char  model[24];
+  bool  errored;
+};
+static const int HIST_MAX = 10;
+static HistEntry history[HIST_MAX];
+static int       histCount  = 0;
+static int       histScroll = 0;
 
 // Permission FIFO
 // PERM_TIMEOUT_MS matches the daemon's default --timeout (90s). If the two
@@ -336,6 +352,18 @@ static int newSession(const char* sid) {
 static void removeSession(const char* sid) {
   int idx = findSession(sid);
   if (idx >= 0) {
+    // History: remember this finished conversation (newest first). Only real
+    // work is kept — an empty shell that never did anything isn't interesting.
+    if (sessions[idx].project[0] && sessions[idx].total_tokens > 0) {
+      int last = (histCount < HIST_MAX) ? histCount : HIST_MAX - 1;
+      for (int i = last; i > 0; i--) history[i] = history[i - 1];
+      strlcpy(history[0].project, sessions[idx].project, sizeof(history[0].project));
+      history[0].total_tokens = sessions[idx].total_tokens;
+      history[0].cost_usd     = sessions[idx].cost_usd;
+      strlcpy(history[0].model, sessions[idx].model, sizeof(history[0].model));
+      history[0].errored      = sessions[idx].errored;
+      if (histCount < HIST_MAX) histCount++;
+    }
     sessions[idx].active = false;
     if (sessionCount > 0) sessionCount--;
   }
@@ -1122,7 +1150,58 @@ static void drawGlobalStats() {
   detailStat(152, "cost",     db, COL_AMBER_HOT);
 
   useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("press: back", CX, 198);
+  canvas.drawString("press: recent", CX, 198);
+  canvas.pushSprite(0, 0);
+}
+
+// HISTORY: recently-finished conversations (from the RAM ring), newest first,
+// scrolled with the encoder. Two lines per entry: project, then tokens/cost/model.
+static void drawHistory() {
+  drawBase();
+  useS();
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  drawTracked("RECENT", CX, 24, 3);
+
+  if (histCount == 0) {
+    canvas.setTextColor(COL_GRAY, COL_BG);
+    canvas.drawString("nothing finished yet", CX, CY);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("press: back", CX, 200);
+    canvas.pushSprite(0, 0);
+    return;
+  }
+
+  const int visible = 3, startY = 62, rowH = 46;
+  if (histScroll > histCount - visible) histScroll = histCount - visible;
+  if (histScroll < 0) histScroll = 0;
+
+  for (int row = 0; row < visible && (histScroll + row) < histCount; row++) {
+    int i = histScroll + row;
+    int y = startY + row * rowH;
+    HistEntry &h = history[i];
+
+    char proj[16];
+    strlcpy(proj, h.project, sizeof(proj));   // truncate long names
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(h.errored ? COL_RED : COL_INK, COL_BG);
+    canvas.drawString(proj, CX, y);
+
+    char tk[12], sub[28];
+    if (h.total_tokens > 0) fmtTokens(h.total_tokens, tk, sizeof(tk)); else strlcpy(tk, "-", sizeof(tk));
+    if (h.cost_usd > 0) snprintf(sub, sizeof(sub), "%s / $%.2f", tk, h.cost_usd);
+    else                snprintf(sub, sizeof(sub), "%s", tk);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString(sub, CX, y + 17);
+  }
+
+  // scroll dots
+  if (histCount > visible) {
+    for (int i = 0; i < histCount; i++) {
+      uint32_t dc = (i >= histScroll && i < histScroll + visible) ? COL_AMBER : COL_RING;
+      canvas.fillCircle(CX - (histCount * 6) / 2 + i * 6 + 3, 214, 2, dc);
+    }
+  }
   canvas.pushSprite(0, 0);
 }
 
@@ -1612,6 +1691,7 @@ static void redraw() {
     case SESSION_LIST: drawSessionList(); break;
     case DETAIL:       drawDetail();      break;
     case GLOBAL_STATS: drawGlobalStats(); break;
+    case HISTORY:      drawHistory();     break;
     case PERMISSION:   drawPermission();  break;
     case CONFIRMING:   drawConfirming();  break;
     case MODE_MENU:    drawModeMenu();    break;
@@ -1730,7 +1810,7 @@ static void handleEncoder(int delta) {
   // something, and not on SOUND — which previews the real volume level instead.
   switch (appState) {
     case SESSION_LIST: case PERMISSION: case MODE_MENU:
-    case OTA_PROMPT:   case BRIGHTNESS:  case RESET_CONFIRM:
+    case OTA_PROMPT:   case BRIGHTNESS:  case RESET_CONFIRM: case HISTORY:
       playEarcon(delta > 0 ? SND_TICK_CW : SND_TICK_CCW);
       break;
     default: break;
@@ -1769,6 +1849,11 @@ static void handleEncoder(int delta) {
       break;
     case RESET_CONFIRM:
       resetChoice ^= 1;                       // toggle cancel <-> reset
+      needsRedraw = true;
+      break;
+    case HISTORY:
+      histScroll += (delta > 0) ? 1 : -1;     // scroll recent list (clamped in draw)
+      if (histScroll < 0) histScroll = 0;
       needsRedraw = true;
       break;
     case BRIGHTNESS: {
@@ -1816,9 +1901,17 @@ static void handlePress() {
       needsRedraw = true;
       break;
 
-    case GLOBAL_STATS:                       // back to the settings menu
+    case GLOBAL_STATS:                       // dive into the recent-history list
+      playEarcon(SND_TICK);
+      histScroll  = 0;
+      appState    = HISTORY;
+      needsRedraw = true;
+      break;
+
+    case HISTORY:                            // back to the settings menu
       playEarcon(SND_TICK);
       appState    = MODE_MENU;
+      menuChoice  = 5;                        // land on the "stats" entry
       needsRedraw = true;
       break;
 
