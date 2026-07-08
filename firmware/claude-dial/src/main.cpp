@@ -790,6 +790,18 @@ static void applyBrightness() {
   M5Dial.Display.setBrightness((uint8_t)b);
 }
 
+// Screen sleep — the real point of night mode. When night is active and nothing
+// has touched the dial for a while (and no session needs you), blank the screen
+// entirely. Any input, or an incoming permission, wakes it.
+static bool     screenAsleep    = false;
+static uint32_t lastInteraction = 0;
+static const uint32_t SLEEP_AFTER_MS = 25000;
+static bool nightActive() { return nightMode == 2 || (nightMode == 1 && isNightHour()); }
+static void wakeScreen() {
+  lastInteraction = millis();
+  if (screenAsleep) { screenAsleep = false; applyBrightness(); needsRedraw = true; }
+}
+
 // Gauge colour by how close the 5h window is to the cap: amber → hot → red.
 static uint32_t usageColor() {
   if (usagePct >= 85) return COL_RED;
@@ -2171,6 +2183,7 @@ void loop() {
   // Deferred "needs you" earcon (set from handleRxMessage, played off the BLE task)
   if (buzzPending) {
     buzzPending = false;
+    wakeScreen();                 // never sleep through a permission / needs-you
     playEarcon(SND_NEEDS_YOU);
   }
 
@@ -2239,32 +2252,45 @@ void loop() {
   long delta = pos - lastEncoderPos;
   if (delta != 0) {
     lastEncoderPos = pos;
-    encAccum += delta;
-    const long ENC_DETENT = 4;   // this encoder emits 4 counts per physical detent
-    while (encAccum >=  ENC_DETENT) { handleEncoder(+1); encAccum -= ENC_DETENT; }
-    while (encAccum <= -ENC_DETENT) { handleEncoder(-1); encAccum += ENC_DETENT; }
+    if (screenAsleep) { wakeScreen(); encAccum = 0; }   // first turn only wakes
+    else {
+      lastInteraction = millis();
+      encAccum += delta;
+      const long ENC_DETENT = 4;   // this encoder emits 4 counts per physical detent
+      while (encAccum >=  ENC_DETENT) { handleEncoder(+1); encAccum -= ENC_DETENT; }
+      while (encAccum <= -ENC_DETENT) { handleEncoder(-1); encAccum += ENC_DETENT; }
+    }
   }
 
   // Button: short click vs long hold, cleanly separated
   if (M5Dial.BtnA.wasClicked()) {
-    handlePress();
+    if (screenAsleep) wakeScreen();               // wake, don't act on the first press
+    else { lastInteraction = millis(); handlePress(); }
   }
   if (M5Dial.BtnA.wasHold()) {
-    if (appState == BRIGHTNESS) {                  // display: hold saves brightness & exits
-      prefs.putUChar("bright", brightness);
-      appState    = MODE_MENU;
-      menuChoice  = 1;
-      needsRedraw = true;
-    } else if (appState != MODE_MENU && appState != SOUND) {
-      appState    = MODE_MENU;
-      menuChoice  = 0;
-      needsRedraw = true;
+    if (screenAsleep) {
+      wakeScreen();
+    } else {
+      lastInteraction = millis();
+      if (appState == BRIGHTNESS) {                // display: hold saves brightness & exits
+        prefs.putUChar("bright", brightness);
+        appState    = MODE_MENU;
+        menuChoice  = 1;
+        needsRedraw = true;
+      } else if (appState != MODE_MENU && appState != SOUND) {
+        appState    = MODE_MENU;
+        menuChoice  = 0;
+        needsRedraw = true;
+      }
     }
   }
 
   // Touch: a tap (finger lifted) selects and fires the choice under it.
   auto tp = M5Dial.Touch.getDetail();
-  if (tp.wasClicked()) handleTouch(tp.x, tp.y);
+  if (tp.wasClicked()) {
+    if (screenAsleep) wakeScreen();
+    else { lastInteraction = millis(); handleTouch(tp.x, tp.y); }
+  }
 
   // Grace window elapsed with no undo -> the decision is finally sent.
   if (appState == CONFIRMING && (millis() - confirmStart) > CONFIRM_MS) {
@@ -2290,7 +2316,7 @@ void loop() {
   // Periodic redraws: idle clock (10s), permission countdown arc (1s), and the
   // roster spinner (~150ms, only while a session is "working").
   static unsigned long lastSlow = 0, lastFast = 0, lastNight = 0;
-  if (millis() - lastNight > 30000) { lastNight = millis(); applyBrightness(); }  // night auto-dim
+  if (millis() - lastNight > 30000) { lastNight = millis(); if (!screenAsleep) applyBrightness(); }  // night auto-dim
   if (appState == IDLE && millis() - lastSlow > 10000) {
     lastSlow = millis(); needsRedraw = true;
   }
@@ -2316,6 +2342,23 @@ void loop() {
     if (anyWorking || anyWaiting) needsRedraw = true;     // spinner and/or the needs-you pulse
   }
 
-  if (needsRedraw) redraw();
+  // Screen sleep decision: wake instantly if a session needs you; otherwise, at
+  // night, blank the dial once it's been idle long enough.
+  bool needsYou = false;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (sessions[i].active && (strcmp(sessions[i].state, "blocked") == 0 ||
+        strcmp(sessions[i].state, "permission_request") == 0)) { needsYou = true; break; }
+  }
+  if (screenAsleep && needsYou) {
+    wakeScreen();
+  } else if (!screenAsleep && nightActive() && !needsYou &&
+             appState != PERMISSION && appState != CONFIRMING &&
+             appState != OTA && appState != OTA_PROMPT &&
+             millis() - lastInteraction > SLEEP_AFTER_MS) {
+    M5Dial.Display.setBrightness(0);   // veille: screen off
+    screenAsleep = true;
+  }
+
+  if (needsRedraw && !screenAsleep) redraw();
   delay(10);
 }
