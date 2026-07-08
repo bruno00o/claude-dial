@@ -747,6 +747,8 @@ static uint32_t ctxColor(int pct) {
 // brightness the user set — never brighter — and only once the bridge has set
 // the clock (otherwise the RTC hour can't be trusted).
 static const int NIGHT_START = 22, NIGHT_END = 7;
+static int nightMode = 1;   // 0 = off, 1 = auto (by hour), 2 = always on
+static const char* NIGHT_LABELS[3] = { "off", "auto", "on" };
 static bool isNightHour() {
   if (!hasEverConnected) return false;
   int h = M5Dial.Rtc.getDateTime().time.hours;
@@ -754,7 +756,8 @@ static bool isNightHour() {
 }
 static void applyBrightness() {
   int b = brightness;
-  if (isNightHour()) b = b * 35 / 100;        // dim to ~35% at night
+  bool dim = (nightMode == 2) || (nightMode == 1 && isNightHour());
+  if (dim) b = b * 35 / 100;                   // dim to ~35%
   if (b < 8) b = 8;
   M5Dial.Display.setBrightness((uint8_t)b);
 }
@@ -1319,9 +1322,9 @@ static void drawConfirming() {
   canvas.pushSprite(0, 0);
 }
 
-static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "connection", "firmware", "stats", "reset" };
-static const int MENU_N   = 8;
-static const int MENU_GAP = 26;   // row pitch; tightened so 7 entries clear the title
+static const char* menuLabels[] = { "monitor", "display", "sound", "connection", "firmware", "stats", "reset" };
+static const int MENU_N   = 7;   // "display" merges brightness + clock + night mode
+static const int MENU_GAP = 26;   // row pitch (unused now the menu scrolls)
 
 // Draw a monospace string centred on cx with `extra` px between glyphs — the
 // wide-tracking "readout" look for the clock and uppercase labels. Font + colour
@@ -1359,27 +1362,22 @@ static void drawMenuIcon(int k, int x, int y, uint32_t col) {
       canvas.fillRect(x - 5, y - 2, 4, 5, col);
       canvas.drawArc(x + 4, y, 4, 5, -45, 45, col);
       break;
-    case 3:  // clock — a face with hands
-      canvas.drawCircle(x, y, 5, col);
-      canvas.drawLine(x, y, x, y - 3, col);
-      canvas.drawLine(x, y, x + 2, y + 1, col);
-      break;
-    case 4:  // connection — a signal dot with arcs
+    case 3:  // connection — a signal dot with arcs
       canvas.fillCircle(x, y, 2, col);
       canvas.drawArc(x, y, 5, 6, 40, 140, col);
       canvas.drawArc(x, y, 5, 6, 220, 320, col);
       break;
-    case 5:  // firmware — an up chevron on a stem
+    case 4:  // firmware — an up chevron on a stem
       canvas.drawLine(x - 4, y + 2, x, y - 4, col);
       canvas.drawLine(x, y - 4, x + 4, y + 2, col);
       canvas.drawLine(x, y - 4, x, y + 5, col);
       break;
-    case 6:  // stats — three ascending bars
+    case 5:  // stats — three ascending bars
       canvas.fillRect(x - 5, y + 1, 2, 4, col);
       canvas.fillRect(x - 1, y - 2, 2, 7, col);
       canvas.fillRect(x + 3, y - 5, 2, 10, col);
       break;
-    case 7:  // reset — a refresh arc with an arrowhead
+    case 6:  // reset — a refresh arc with an arrowhead
       canvas.drawArc(x, y, 4, 5, 300, 200, col);
       canvas.drawLine(x + 4, y - 3, x + 7, y - 2, col);
       canvas.drawLine(x + 5, y + 1, x + 7, y - 2, col);
@@ -1466,25 +1464,38 @@ static void drawReset() {
   canvas.pushSprite(0, 0);
 }
 
-static void drawBrightness() {
+static void drawBrightness() {   // the "display" screen: clock + brightness + night mode
   drawBase();
   canvas.setTextDatum(middle_center);
+
+  // clock — grouped in here so the menu needs one "display" entry, not two
+  auto dt = M5Dial.Rtc.getDateTime();
+  char clk[8]; snprintf(clk, sizeof(clk), "%02d:%02d", dt.time.hours, dt.time.minutes);
+  useM();
+  canvas.setTextColor(COL_INK, COL_BG);
+  canvas.drawString(clk, CX, 44);
+
   useS();
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("brightness", CX, 72);
+  canvas.drawString("brightness", CX, 76);
 
   char pct[8]; snprintf(pct, sizeof(pct), "%d%%", (brightness * 100) / 255);
   useL();
   canvas.setTextColor(COL_AMBER, COL_BG);
-  canvas.drawString(pct, CX, CY - 6);
+  canvas.drawString(pct, CX, 106);
 
-  int bw = 150, bh = 8, bx = CX - bw / 2, by = 150;
+  int bw = 150, bh = 8, bx = CX - bw / 2, by = 138;
   canvas.drawRoundRect(bx, by, bw, bh, 4, COL_RING);
   canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * brightness / 255, bh - 2, 3, COL_AMBER);
 
+  // night mode — off / auto (by hour) / on
   useS();
+  char nl[20]; snprintf(nl, sizeof(nl), "night  %s", NIGHT_LABELS[nightMode]);
+  canvas.setTextColor(nightMode ? COL_AMBER : COL_GRAY, COL_BG);
+  canvas.drawString(nl, CX, 168);
+
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("turn / press", CX, 190);
+  canvas.drawString("tap night / hold back", CX, 196);
   canvas.pushSprite(0, 0);
 }
 
@@ -1848,13 +1859,12 @@ static void handlePress() {
     case MODE_MENU:
       switch (menuChoice) {
         case 0: appState = homeView();    break;   // monitor — back to the main view
-        case 1: appState = BRIGHTNESS;    break;
+        case 1: appState = BRIGHTNESS;    break;   // "display" — brightness + clock + night
         case 2: appState = SOUND;         break;
-        case 3: appState = CLOCK;         break;
-        case 4: appState = CONNECTION;    break;
-        case 5: appState = FIRMWARE_INFO; break;
-        case 6: appState = GLOBAL_STATS;  break;
-        case 7: appState = RESET_CONFIRM; resetChoice = 0; break;  // default to cancel
+        case 3: appState = CONNECTION;    break;
+        case 4: appState = FIRMWARE_INFO; break;
+        case 5: appState = GLOBAL_STATS;  break;
+        case 6: appState = RESET_CONFIRM; resetChoice = 0; break;  // default to cancel
       }
       needsRedraw = true;
       break;
@@ -1883,10 +1893,10 @@ static void handlePress() {
       needsRedraw = true;
       break;
 
-    case BRIGHTNESS:                               // confirm — persist and back to menu
-      prefs.putUChar("bright", brightness);
-      appState    = MODE_MENU;
-      menuChoice  = 1;
+    case BRIGHTNESS:                               // display: tap cycles night mode
+      nightMode = (nightMode + 1) % 3;
+      prefs.putUChar("night", (uint8_t)nightMode);
+      applyBrightness();
       needsRedraw = true;
       break;
 
@@ -1985,6 +1995,7 @@ void setup() {
 
   prefs.begin("cdial", false);
   brightness = prefs.getUChar("bright", 180);
+  nightMode  = prefs.getUChar("night", 1);
   M5Dial.Display.setBrightness(0);   // stay dark until the boot fade-in
   soundVol = prefs.getUChar("vol", 128);
   M5Dial.Speaker.setVolume(soundVol);
@@ -2146,7 +2157,12 @@ void loop() {
     handlePress();
   }
   if (M5Dial.BtnA.wasHold()) {
-    if (appState != MODE_MENU && appState != BRIGHTNESS && appState != SOUND) {
+    if (appState == BRIGHTNESS) {                  // display: hold saves brightness & exits
+      prefs.putUChar("bright", brightness);
+      appState    = MODE_MENU;
+      menuChoice  = 1;
+      needsRedraw = true;
+    } else if (appState != MODE_MENU && appState != SOUND) {
       appState    = MODE_MENU;
       menuChoice  = 0;
       needsRedraw = true;
