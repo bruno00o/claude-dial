@@ -51,6 +51,7 @@ type SessionUsage struct {
 	Context   int64   // tokens resident in the context window at the last main-thread assistant turn
 	SubAgents int     // Task sub-agents spawned (count of Task tool_use blocks in the transcript)
 	Cost      float64 // cumulative USD cost for this conversation (ccusage-style, all turns)
+	Model     string  // the last main-thread assistant model (e.g. "claude-sonnet-4-6")
 }
 
 // modelPriceUSD returns (inputPerM, outputPerM) in USD per 1M tokens for a model,
@@ -315,6 +316,9 @@ func scanFile(events []event, path string, since time.Time) ([]event, SessionUsa
 				if l.Type == "assistant" && !l.IsSidechain {
 					if c := l.residentContextTokens(); c > 0 {
 						su.Context = c
+					}
+					if l.Message.Model != "" && l.Message.Model != "<synthetic>" {
+						su.Model = l.Message.Model // last real model wins
 					}
 					// Sub-agents are launched from the main thread via the Task tool.
 					su.SubAgents += countTaskBlocks(l.Message.Content)

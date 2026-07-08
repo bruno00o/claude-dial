@@ -109,6 +109,7 @@ struct Session {
   int   context_pct;    // context as a % of the model max (for the rim, 0 = unknown)
   int   sub_agents;     // Task sub-agents this conversation has spawned
   float cost_usd;       // cumulative USD cost for this conversation
+  char  model[24];      // short model name, e.g. "sonnet-4-6"
   bool  active;
 };
 
@@ -523,6 +524,7 @@ static void handleRxMessage(const char* data, uint16_t len) {
   sessions[idx].context_pct    = doc["context_pct"]    | 0;
   sessions[idx].sub_agents     = doc["sub_agents"]     | 0;
   sessions[idx].cost_usd       = doc["cost_usd"]       | 0.0f;
+  strlcpy(sessions[idx].model, doc["model"] | "", sizeof(sessions[idx].model));
 
   if (strcmp(state, "permission_request") == 0) {
     bool isNew = !permInQueue(sid) && strcmp(currentPermSid, sid) != 0;
@@ -1068,7 +1070,11 @@ static void drawDetail() {
   detailStat(106, "context", cbuf, COL_INK);
   detailStat(128, "total",   tbuf, COL_INK);
   detailStat(150, "cost",    dbuf, COL_AMBER_HOT);
-  detailStat(172, "agents",  abuf, s.sub_agents > 0 ? COL_AMBER : COL_GRAY);
+  // 4th row is adaptive: sub-agents when this conversation delegated any (the
+  // interesting case), otherwise the model it's running on (always useful).
+  if (s.sub_agents > 0)      detailStat(172, "agents", abuf, COL_AMBER);
+  else if (s.model[0])       detailStat(172, "model",  s.model, COL_INK);
+  else                       detailStat(172, "agents", abuf, COL_GRAY);
 
   useS();
   canvas.setTextDatum(middle_center);
@@ -1382,18 +1388,38 @@ static void drawModeMenu() {
   drawBase();
   useS();
   canvas.setTextColor(COL_DIM, COL_BG);
-  drawTracked("SETTINGS", CX, 22, 3);
+  canvas.setTextDatum(middle_center);
+  drawTracked("SETTINGS", CX, 24, 3);
 
+  // Scrolling window: the round screen can't show all entries at once, so show a
+  // few and scroll so the selection stays visible (mirrors the roster).
+  static int menuScroll = 0;
+  const int visible = 5;
+  if (menuChoice < menuScroll)               menuScroll = menuChoice;
+  if (menuChoice >= menuScroll + visible)    menuScroll = menuChoice - visible + 1;
+  if (menuScroll > MENU_N - visible)         menuScroll = MENU_N - visible;
+  if (menuScroll < 0)                        menuScroll = 0;
+
+  const int startY = 58, rowH = 30;
   useS();
-  for (int i = 0; i < MENU_N; i++) {
+  for (int row = 0; row < visible && (menuScroll + row) < MENU_N; row++) {
+    int i = menuScroll + row;
+    int y = startY + row * rowH;
     bool sel = (i == menuChoice);
-    int  y   = CY - (MENU_N - 1) * (MENU_GAP / 2) + i * MENU_GAP;   // vertically centered
     if (sel) canvas.fillSmoothRoundRect(CX - 78, y - 12, 156, 24, 11, COL_AMBER);  // AA selection pill
     uint32_t fg = sel ? COL_BG : COL_GRAY;
     drawMenuIcon(i, CX - 58, y, fg);
     canvas.setTextColor(fg, sel ? COL_AMBER : COL_BG);   // opaque text over the pill
     canvas.setTextDatum(middle_left);
     canvas.drawString(menuLabels[i], CX - 42, y);
+  }
+
+  // scroll dots — one per entry, the visible window lit (mirrors the roster)
+  if (MENU_N > visible) {
+    for (int i = 0; i < MENU_N; i++) {
+      uint32_t dc = (i >= menuScroll && i < menuScroll + visible) ? COL_AMBER : COL_RING;
+      canvas.fillCircle(CX - (MENU_N * 6) / 2 + i * 6 + 3, 224, 2, dc);
+    }
   }
   canvas.pushSprite(0, 0);
 }
