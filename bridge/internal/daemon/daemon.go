@@ -92,6 +92,9 @@ type Config struct {
 	// RulesPath is the JSON file backing per-session "always allow" grants.
 	// Empty keeps them in memory only (lost on restart).
 	RulesPath string
+	// AliasesPath is an optional JSON map of project-name → display-name overrides.
+	// Empty disables aliasing (projects show their resolved name).
+	AliasesPath string
 	// FirmwareManifestURL overrides where the latest-firmware manifest is fetched
 	// from. Empty uses firmware.DefaultManifestURL (the GitHub latest release).
 	FirmwareManifestURL string
@@ -139,6 +142,7 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 		bridgeVersion: cfg.BridgeVersion,
 		contextMax:    cfg.ContextMax,
 	}
+	projAliases = loadAliases(cfg.AliasesPath) // project-name → display-name overrides
 	go d.dispatch()
 	go d.sweep(cfg.IdleAfter, cfg.BlockedIdleAfter, cfg.ForgetAfter)
 	go d.fw.Run(context.Background(), 30*time.Minute)

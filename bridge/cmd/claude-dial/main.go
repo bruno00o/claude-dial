@@ -115,7 +115,7 @@ func cmdServe(args []string) {
 		}
 	}
 
-	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), BridgeVersion: version, UsageBudgetTokens: *usageBudget, ContextMax: *contextMax, Debug: *debug})
+	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), AliasesPath: aliasesPath(), BridgeVersion: version, UsageBudgetTokens: *usageBudget, ContextMax: *contextMax, Debug: *debug})
 
 	mux := http.NewServeMux()
 	hub.RegisterRoutes(mux)
@@ -518,6 +518,16 @@ func rulesPath() string {
 		return ""
 	}
 	return filepath.Join(dir, "claude-dial", "always-allow.json")
+}
+
+// aliasesPath is an optional JSON map of project-name → display-name, letting a
+// repo show a friendlier label on the dial (e.g. {"claude-dial":"dial"}).
+func aliasesPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "claude-dial", "names.json")
 }
 
 func check(err error) {

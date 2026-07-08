@@ -381,6 +381,28 @@ var (
 
 // projectName derives a stable, human label for a session from its cwd (the
 // basename of the nearest ancestor that looks like a project root), memoized by
+// projAliases maps a resolved project name to a user-chosen display name, loaded
+// once at startup. nil when none are configured.
+var projAliases map[string]string
+
+// loadAliases reads an optional JSON object of project-name → display-name (e.g.
+// {"claude-dial":"dial","5min-btc-polymarket":"btc"}) so a repo can wear a
+// friendlier label on the small screen. A missing or malformed file yields none.
+func loadAliases(path string) map[string]string {
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var m map[string]string
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	return m
+}
+
 // cwd. The marker walk stats the filesystem and runs on the dense liveness
 // hooks, but a cwd's root never changes within a run, so each is resolved once.
 func projectName(cwd string) string {
@@ -393,6 +415,9 @@ func projectName(cwd string) string {
 		return n
 	}
 	n := resolveProject(cwd)
+	if a, ok := projAliases[n]; ok && a != "" {
+		n = a // user-chosen friendly name for this project
+	}
 	projCache[cwd] = n
 	return n
 }
