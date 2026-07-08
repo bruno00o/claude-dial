@@ -110,6 +110,7 @@ struct Session {
   int   sub_agents;     // Task sub-agents this conversation has spawned
   float cost_usd;       // cumulative USD cost for this conversation
   char  model[24];      // short model name, e.g. "sonnet-4-6"
+  bool  errored;        // the most recent tool call in this conversation failed
   bool  active;
 };
 
@@ -525,6 +526,7 @@ static void handleRxMessage(const char* data, uint16_t len) {
   sessions[idx].sub_agents     = doc["sub_agents"]     | 0;
   sessions[idx].cost_usd       = doc["cost_usd"]       | 0.0f;
   strlcpy(sessions[idx].model, doc["model"] | "", sizeof(sessions[idx].model));
+  sessions[idx].errored        = doc["errored"] | false;
 
   if (strcmp(state, "permission_request") == 0) {
     bool isNew = !permInQueue(sid) && strcmp(currentPermSid, sid) != 0;
@@ -966,13 +968,14 @@ static void drawSessionList() {
 
     canvas.setTextColor(col, COL_BG);
     canvas.setTextDatum(middle_left);
+    uint32_t gCol = s.errored ? COL_RED : col;       // error sniffer: red status glyph
     if (waiting) {                                   // needs-you: a hot filled triangle
-      canvas.fillTriangle(CX - 90, y - 5, CX - 90, y + 5, CX - 82, y, col);
+      canvas.fillTriangle(CX - 90, y - 5, CX - 90, y + 5, CX - 82, y, gCol);
     } else if (working) {                            // working: a smooth spinning C-arc
       int base = spinFrame * 90;                       // advances each 150ms tick
-      canvas.fillArc(CX - 88, y, 3, 6, base, base + 270, col);
+      canvas.fillArc(CX - 88, y, 3, 6, base, base + 270, gCol);
     } else {                                          // idle: a soft AA dot
-      canvas.fillSmoothCircle(CX - 88, y, 2, col);
+      canvas.fillSmoothCircle(CX - 88, y, 2, gCol);
     }
     canvas.drawString(lf, CX - 70, y);
     if (tok[0]) {                                    // dim per-conversation token count

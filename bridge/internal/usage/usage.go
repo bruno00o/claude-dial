@@ -52,6 +52,29 @@ type SessionUsage struct {
 	SubAgents int     // Task sub-agents spawned (count of Task tool_use blocks in the transcript)
 	Cost      float64 // cumulative USD cost for this conversation (ccusage-style, all turns)
 	Model     string  // the last main-thread assistant model (e.g. "claude-sonnet-4-6")
+	LastError bool    // the most recent tool result in the transcript was an error
+}
+
+// lastToolResultError scans a turn's content for tool_result blocks and reports
+// whether the last one was an error. Non-array content (plain text turns) yields
+// (false, false), so it never trips on ordinary messages.
+func lastToolResultError(content json.RawMessage) (found, isErr bool) {
+	if len(content) == 0 || content[0] != '[' {
+		return false, false
+	}
+	var blocks []struct {
+		Type    string `json:"type"`
+		IsError bool   `json:"is_error"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return false, false
+	}
+	for _, b := range blocks {
+		if b.Type == "tool_result" {
+			found, isErr = true, b.IsError
+		}
+	}
+	return found, isErr
 }
 
 // modelPriceUSD returns (inputPerM, outputPerM) in USD per 1M tokens for a model,
@@ -300,6 +323,12 @@ func scanFile(events []event, path string, since time.Time) ([]event, SessionUsa
 		if len(raw) > 0 {
 			var l lineUsage
 			if json.Unmarshal(raw, &l) == nil {
+				// Error sniffer: the most recent tool result's error state (tool
+				// results live in user turns). The last one seen wins, so a later
+				// success clears it — the row reflects "the last tool call failed".
+				if found, isErr := lastToolResultError(l.Message.Content); found {
+					su.LastError = isErr
+				}
 				work := l.workTokens()
 				// Global 5h gauge — unchanged: work tokens, in-window only.
 				if work > 0 && !l.Timestamp.IsZero() && !l.Timestamp.Before(since) {

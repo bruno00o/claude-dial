@@ -191,6 +191,7 @@ func (d *Daemon) enrichedSessions() []protocol.SessionView {
 		sessions[i].SubAgents = u.SubAgents
 		sessions[i].CostUSD = u.Cost
 		sessions[i].Model = strings.TrimPrefix(u.Model, "claude-") // "claude-sonnet-4-6" → "sonnet-4-6"
+		sessions[i].Errored = u.LastError
 		// Context as a % of the model's max context — the rim's gauge.
 		if d.contextMax > 0 {
 			pct := int(u.Context * 100 / d.contextMax)

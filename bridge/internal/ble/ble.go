@@ -495,6 +495,7 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 				SubAgents:     s.SubAgents,
 				CostUSD:       s.CostUSD,
 				Model:         s.Model,
+				Errored:       s.Errored,
 			}) {
 				d.mu.Lock()
 				d.last[s.SessionID] = s
