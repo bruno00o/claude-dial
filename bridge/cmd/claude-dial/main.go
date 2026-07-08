@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -53,6 +54,8 @@ func main() {
 		cmdStatus(os.Args[2:])
 	case "firmware":
 		cmdFirmware(os.Args[2:])
+	case "cost":
+		cmdCost(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("claude-dial", version)
 	case "help", "--help", "-h":
@@ -77,6 +80,7 @@ func usage() {
   firmware status   show the Dial's firmware version and whether an update exists
   firmware update   flash the latest firmware to the Dial over BLE (already-flashed Dial)
   firmware flash    first flash of a blank Dial over USB (needs esptool)
+  cost              token + dollar-cost report from your transcripts (via ccusage)
   status            query a running daemon
   version
 `)
@@ -468,6 +472,29 @@ func firmwareUpdate(port int, force bool) {
 		}
 	}
 	if failed {
+		os.Exit(1)
+	}
+}
+
+// cmdCost shells out to ccusage — the ccusage.approach the rim gauge is modeled
+// on (see README) — for a full token + dollar-cost breakdown read from Claude
+// Code's local transcripts. All args pass through, e.g. `claude-dial cost daily`,
+// `cost monthly`, `cost session`, `cost --json`. Prefers a ccusage already on
+// PATH; otherwise runs `npx -y ccusage@latest`.
+func cmdCost(args []string) {
+	name, full := "", []string(nil)
+	if p, err := exec.LookPath("ccusage"); err == nil {
+		name, full = p, args
+	} else if p, err := exec.LookPath("npx"); err == nil {
+		name, full = p, append([]string{"-y", "ccusage@latest"}, args...)
+	} else {
+		fmt.Fprintln(os.Stderr, "cost: needs `ccusage` or `npx` on your PATH.")
+		fmt.Fprintln(os.Stderr, "  install Node.js (which ships npx), or: npm i -g ccusage")
+		os.Exit(1)
+	}
+	cmd := exec.Command(name, full...)
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+	if err := cmd.Run(); err != nil {
 		os.Exit(1)
 	}
 }
