@@ -23,6 +23,19 @@ type hookInput struct {
 	Cwd           string          `json:"cwd"`
 	ToolName      string          `json:"tool_name"`
 	ToolInput     json.RawMessage `json:"tool_input"`
+	// PermissionMode is Claude Code's current mode: "default" (asks the user),
+	// or an auto-approving mode — "acceptEdits", "auto", "plan", "dontAsk",
+	// "bypassPermissions". The dial only takes over a decision in "default".
+	PermissionMode string `json:"permission_mode"`
+}
+
+// autoApproves reports whether Claude Code's permission mode decides on its own
+// (so the dial should stay out of the way). Only "default" — the mode that asks
+// the user — warrants a tactile approval; every other mode auto-resolves. An
+// empty mode (older Claude Code that doesn't send it) is treated as "default"
+// so behaviour is unchanged there.
+func autoApproves(mode string) bool {
+	return mode != "" && mode != "default"
 }
 
 // hookOutput is the JSON a PreToolUse hook returns to steer the permission.
@@ -127,6 +140,17 @@ func (d *Daemon) handleEvent(w http.ResponseWriter, in hookInput) {
 func (d *Daemon) handlePreToolUse(w http.ResponseWriter, r *http.Request, in hookInput) {
 	project := projectName(in.Cwd)
 	command := extractCommand(in.ToolInput)
+
+	// Claude Code is in an auto-approving mode (acceptEdits/auto/bypass/plan/…):
+	// it decides on its own, so the dial must not take over the screen for a
+	// decision. Show the session as working and let Claude proceed — the tactile
+	// approval only fires in "default" (ask) mode.
+	if autoApproves(in.PermissionMode) {
+		d.store.Upsert(in.SessionID, project, protocol.StateWorking, in.ToolName, command)
+		d.broadcast()
+		writeEmpty(w)
+		return
+	}
 
 	// Already always-allowed for this session? Approve silently — no dial, no
 	// wait — and show the tool as running.
@@ -428,3 +452,5 @@ func writeEmpty(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte("{}"))
 }
+
+// (autoApproves has a focused test in hooks_automode_test.go)
