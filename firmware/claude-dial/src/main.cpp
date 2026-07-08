@@ -96,7 +96,7 @@ static inline void useL();
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, DETAIL, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION, RESET_CONFIRM };
+enum AppState { IDLE, SESSION_LIST, DETAIL, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION, RESET_CONFIRM, GLOBAL_STATS };
 
 struct Session {
   char  session_id[40];
@@ -161,6 +161,7 @@ static void getTimeStr(char* tBuf, char* dBuf);
 static void drawIdle();
 static void drawSessionList();
 static void drawDetail();
+static void drawGlobalStats();
 static void drawPermission();
 static void drawConfirming();
 static void drawModeMenu();
@@ -1076,6 +1077,43 @@ static void drawDetail() {
   canvas.pushSprite(0, 0);
 }
 
+// GLOBAL_STATS: the "everything at a glance" screen (Settings > stats). Aggregates
+// what the device already holds — session count, total tokens and dollar cost
+// summed across all live conversations — with the global 5h quota on the rim.
+static void drawGlobalStats() {
+  drawBase();
+  drawUsageArcBold(usagePct / 100.0f, usageColor(), COL_ARC_OFF);
+  if (usagePct > 0) {
+    useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
+    char rl[12]; snprintf(rl, sizeof(rl), "5h %d%%", usagePct);
+    canvas.drawString(rl, CX, 30);
+  }
+
+  int n = 0; long tokTotal = 0; float costTotal = 0;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (!sessions[i].active) continue;
+    n++;
+    tokTotal  += sessions[i].total_tokens;
+    costTotal += sessions[i].cost_usd;
+  }
+
+  useM(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.drawString("global", CX, 56);
+  canvas.drawFastHLine(CX - 62, 74, 124, COL_RING);
+
+  char sb[12], tb[16], db[16];
+  snprintf(sb, sizeof(sb), "%d", n);
+  if (tokTotal  > 0) fmtTokens(tokTotal, tb, sizeof(tb));            else strlcpy(tb, "-", sizeof(tb));
+  if (costTotal > 0) snprintf(db, sizeof(db), "$%.2f", costTotal);  else strlcpy(db, "-", sizeof(db));
+  detailStat(100, "sessions", sb, COL_INK);
+  detailStat(126, "tokens",   tb, COL_INK);
+  detailStat(152, "cost",     db, COL_AMBER_HOT);
+
+  useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("press: back", CX, 198);
+  canvas.pushSprite(0, 0);
+}
+
 static const char* choiceLabels[3] = { "allow once", "always allow", "reject" };
 
 // isDangerous flags commands worth a second look (P5): destructive, privilege-
@@ -1272,8 +1310,8 @@ static void drawConfirming() {
   canvas.pushSprite(0, 0);
 }
 
-static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "connection", "firmware", "reset" };
-static const int MENU_N   = 7;
+static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "connection", "firmware", "stats", "reset" };
+static const int MENU_N   = 8;
 static const int MENU_GAP = 26;   // row pitch; tightened so 7 entries clear the title
 
 // Draw a monospace string centred on cx with `extra` px between glyphs — the
@@ -1327,7 +1365,12 @@ static void drawMenuIcon(int k, int x, int y, uint32_t col) {
       canvas.drawLine(x, y - 4, x + 4, y + 2, col);
       canvas.drawLine(x, y - 4, x, y + 5, col);
       break;
-    case 6:  // reset — a refresh arc with an arrowhead
+    case 6:  // stats — three ascending bars
+      canvas.fillRect(x - 5, y + 1, 2, 4, col);
+      canvas.fillRect(x - 1, y - 2, 2, 7, col);
+      canvas.fillRect(x + 3, y - 5, 2, 10, col);
+      break;
+    case 7:  // reset — a refresh arc with an arrowhead
       canvas.drawArc(x, y, 4, 5, 300, 200, col);
       canvas.drawLine(x + 4, y - 3, x + 7, y - 2, col);
       canvas.drawLine(x + 5, y + 1, x + 7, y - 2, col);
@@ -1528,6 +1571,7 @@ static void redraw() {
     case IDLE:         drawIdle();         break;
     case SESSION_LIST: drawSessionList(); break;
     case DETAIL:       drawDetail();      break;
+    case GLOBAL_STATS: drawGlobalStats(); break;
     case PERMISSION:   drawPermission();  break;
     case CONFIRMING:   drawConfirming();  break;
     case MODE_MENU:    drawModeMenu();    break;
@@ -1732,6 +1776,12 @@ static void handlePress() {
       needsRedraw = true;
       break;
 
+    case GLOBAL_STATS:                       // back to the settings menu
+      playEarcon(SND_TICK);
+      appState    = MODE_MENU;
+      needsRedraw = true;
+      break;
+
     case PERMISSION: {
       if (permCmdView) { permCmdView = false; permCmdScroll = 0; needsRedraw = true; break; }
       int idx = findSession(currentPermSid);
@@ -1774,7 +1824,8 @@ static void handlePress() {
         case 3: appState = CLOCK;         break;
         case 4: appState = CONNECTION;    break;
         case 5: appState = FIRMWARE_INFO; break;
-        case 6: appState = RESET_CONFIRM; resetChoice = 0; break;  // default to cancel
+        case 6: appState = GLOBAL_STATS;  break;
+        case 7: appState = RESET_CONFIRM; resetChoice = 0; break;  // default to cancel
       }
       needsRedraw = true;
       break;
