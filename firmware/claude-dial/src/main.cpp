@@ -96,7 +96,7 @@ static inline void useL();
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION, RESET_CONFIRM };
+enum AppState { IDLE, SESSION_LIST, DETAIL, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION, RESET_CONFIRM };
 
 struct Session {
   char  session_id[40];
@@ -106,6 +106,8 @@ struct Session {
   char  command[200];
   long  total_tokens;   // cumulative "work" tokens for this conversation (0 = unknown)
   long  context_tokens; // tokens resident in the context window now (0 = unknown)
+  int   context_pct;    // context as a % of the model max (for the rim, 0 = unknown)
+  int   sub_agents;     // Task sub-agents this conversation has spawned
   bool  active;
 };
 
@@ -157,6 +159,7 @@ static void drawBase();
 static void getTimeStr(char* tBuf, char* dBuf);
 static void drawIdle();
 static void drawSessionList();
+static void drawDetail();
 static void drawPermission();
 static void drawConfirming();
 static void drawModeMenu();
@@ -195,6 +198,9 @@ static bool  permCmdOverflow = false;
 static int   menuChoice = 0;
 static long  lastEncoderPos = 0;
 static int   listScrollOffset = 0;
+static int   rosterSel = 0;            // selected roster row (index into the sorted list)
+static char  rosterSelSid[40] = {0};  // session id under the caret (set each roster draw)
+static char  detailSid[40] = {0};     // session shown in the DETAIL drill-in
 
 // Name of the bridge machine we're connected to (from set_time), shown on idle
 // so you can see which computer the Dial is driving. Cleared on disconnect.
@@ -512,6 +518,8 @@ static void handleRxMessage(const char* data, uint16_t len) {
   strlcpy(sessions[idx].command,   cmd,   sizeof(sessions[idx].command));
   sessions[idx].total_tokens   = doc["total_tokens"]   | 0L;   // omitted on the wire → 0 (unknown)
   sessions[idx].context_tokens = doc["context_tokens"] | 0L;
+  sessions[idx].context_pct    = doc["context_pct"]    | 0;
+  sessions[idx].sub_agents     = doc["sub_agents"]     | 0;
 
   if (strcmp(state, "permission_request") == 0) {
     bool isNew = !permInQueue(sid) && strcmp(currentPermSid, sid) != 0;
@@ -709,7 +717,7 @@ static void drawDotRing(float frac, uint32_t on, uint32_t off, int count, int ra
 static void drawUsageArcBold(float frac, uint32_t on, uint32_t off) {
   if (frac < 0) frac = 0;
   if (frac > 1) frac = 1;
-  const int r0 = CR - 11, r1 = CR - 4;              // 7px band near the edge
+  const int r0 = CR - 8, r1 = CR - 4;               // slim 4px band near the edge
   // Anti-aliased ring via fillArc. Convention (fill_arc_helper, LGFXBase.cpp):
   // 0deg = 3 o'clock, -90 = 12 o'clock, angle increases CLOCKWISE. So fill from
   // the top clockwise. One AA call replaces 360 aliased radial ticks — smoother
@@ -717,6 +725,14 @@ static void drawUsageArcBold(float frac, uint32_t on, uint32_t off) {
   canvas.fillArc(CX, CY, r0, r1, -90.0f, 270.0f, off);              // full dim track
   if (frac > 0.0001f)
     canvas.fillArc(CX, CY, r0, r1, -90.0f, -90.0f + frac * 360.0f, on);
+}
+
+// Context-gauge colour by fill: amber → warm → red as a conversation nears its
+// context limit (same temperature language as the rest of the UI).
+static uint32_t ctxColor(int pct) {
+  if (pct >= 85) return COL_RED;
+  if (pct >= 70) return COL_AMBER_HOT;
+  return COL_AMBER;
 }
 
 // Gauge colour by how close the 5h window is to the cap: amber → hot → red.
@@ -817,14 +833,6 @@ static int sessionRank(const Session& s) {
 
 static void drawSessionList() {
   drawBase();
-  drawUsageArcBold(usagePct / 100.0f, usageColor(), COL_ARC_OFF);   // bold usage ring (5h window)
-  if (usagePct > 0) {   // anchor the rim's meaning so it never reads as "context"
-    useS();
-    canvas.setTextDatum(middle_center);
-    canvas.setTextColor(COL_DIM, COL_BG);
-    char rimLbl[12]; snprintf(rimLbl, sizeof(rimLbl), "5h %d%%", usagePct);
-    canvas.drawString(rimLbl, CX, 30);   // clear of the thick rim band
-  }
 
   int active[MAX_SESSIONS], n = 0, waits = 0;
   for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -840,6 +848,24 @@ static void drawSessionList() {
     int v = active[i], r = sessionRank(sessions[v]), j = i - 1;
     while (j >= 0 && sessionRank(sessions[active[j]]) > r) { active[j + 1] = active[j]; j--; }
     active[j + 1] = v;
+  }
+
+  // Clamp the selection and remember which session is under the caret, so a press
+  // can open its detail view (handlePress needs the sorted selection).
+  if (rosterSel >= n) rosterSel = n - 1;
+  if (rosterSel < 0)  rosterSel = 0;
+  if (n > 0) strlcpy(rosterSelSid, sessions[active[rosterSel]].session_id, sizeof(rosterSelSid));
+
+  // Rim gauge: the SELECTED conversation's context fill (out of the model max) —
+  // a meaningful per-session gauge that follows the caret, not a global quota.
+  int selCtx = (n > 0) ? sessions[active[rosterSel]].context_pct : 0;
+  drawUsageArcBold(selCtx / 100.0f, ctxColor(selCtx), COL_ARC_OFF);
+  if (n > 0 && selCtx > 0) {
+    useS();
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    char rimLbl[16]; snprintf(rimLbl, sizeof(rimLbl), "ctx %d%%", selCtx);
+    canvas.drawString(rimLbl, CX, 30);
   }
 
   // header — masthead like the web roster: count (amber) + "session(s)" (dim) on
@@ -865,6 +891,9 @@ static void drawSessionList() {
   }
 
   const int visible = 4;
+  // Keep the selected row on screen (scroll follows the caret).
+  if (rosterSel < listScrollOffset) listScrollOffset = rosterSel;
+  if (rosterSel >= listScrollOffset + visible) listScrollOffset = rosterSel - visible + 1;
   if (listScrollOffset > n - visible) listScrollOffset = n - visible;
   if (listScrollOffset < 0) listScrollOffset = 0;
 
@@ -890,9 +919,10 @@ static void drawSessionList() {
       col = COL_GRAY;                     // idle
     }
 
+    bool sel = (listScrollOffset + row) == rosterSel;
     // Round-screen vignette: fade rows toward the rim by distance from center —
-    // but never the needs-you rows, which must stay bright wherever they land.
-    if (!waiting) {
+    // but never the needs-you rows, and never the selected row (both stay bright).
+    if (!waiting && !sel) {
       int f = 255 - abs(y - CY) * 2;
       if (f < 150) f = 150;
       col = dimColor(col, f, 255);
@@ -928,15 +958,20 @@ static void drawSessionList() {
       canvas.setTextColor(COL_DIM, COL_BG);
       canvas.drawString(tok, tokRight, y);
     }
+    if (sel)                                         // selection caret (press to drill in)
+      canvas.fillTriangle(CX - 103, y - 4, CX - 103, y + 4, CX - 97, y, COL_AMBER);
   }
 
-  // footer — only shown when something actually needs you; silence otherwise
+  // footer — hint to drill in, or the count of sessions needing you
+  useS();
+  canvas.setTextDatum(middle_center);
   if (waits > 0) {
-    useS();
-    canvas.setTextDatum(middle_center);
     char ft[20]; snprintf(ft, sizeof(ft), "%d waiting", waits);
-    canvas.setTextColor(COL_HOT, COL_BG);   // match the hot "needs you" rows
+    canvas.setTextColor(COL_HOT, COL_BG);
     canvas.drawString(ft, CX, 208);
+  } else {
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("press: details", CX, 208);
   }
 
   // scroll dots
@@ -946,6 +981,77 @@ static void drawSessionList() {
       canvas.fillCircle(CX - (n * 6) / 2 + i * 6 + 3, 226, 2, dc);
     }
   }
+  canvas.pushSprite(0, 0);
+}
+
+// One "label ....... value" row in the detail view: label dim-left, value right.
+static void detailStat(int y, const char* label, const char* value, uint32_t vcol) {
+  useS();
+  canvas.setTextDatum(middle_left);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString(label, CX - 82, y);
+  canvas.setTextDatum(middle_right);
+  canvas.setTextColor(vcol, COL_BG);
+  canvas.drawString(value, CX + 82, y);
+}
+
+// DETAIL: the per-session drill-in reached by pressing a roster row. Shows what
+// that one conversation is doing — its context fill (also on the rim), spend, and
+// the sub-agents it has spawned — the "select a session, see its agents" view.
+static void drawDetail() {
+  int idx = findSession(detailSid);
+  if (idx < 0 || !sessions[idx].active) {   // the session ended while we were in here
+    appState = homeView();
+    needsRedraw = true;
+    return;
+  }
+  Session& s = sessions[idx];
+
+  drawBase();
+  drawUsageArcBold(s.context_pct / 100.0f, ctxColor(s.context_pct), COL_ARC_OFF);  // this session's context
+
+  // title — project name (medium, amber, clipped to the chord)
+  useM();
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  char title[24], tf[24];
+  sessionLabel(s, title, sizeof(title));
+  fitChord(title, tf, sizeof(tf), CX, 46, 'C');
+  canvas.drawString(tf, CX, 46);
+
+  // state (+ tool in flight) — coloured by state
+  bool working = strcmp(s.state, "working") == 0;
+  bool waiting = strcmp(s.state, "blocked") == 0 || strcmp(s.state, "permission_request") == 0;
+  uint32_t stCol = working ? COL_AMBER : (waiting ? COL_HOT : COL_GRAY);
+  char st[48], stf[32];
+  if (s.tool_name[0]) {
+    char tl[24]; strlcpy(tl, s.tool_name, sizeof(tl));
+    for (char* p = tl; *p; p++) *p = tolower(*p);
+    snprintf(st, sizeof(st), "%s - %s", s.state, tl);
+  } else {
+    strlcpy(st, s.state, sizeof(st));
+  }
+  useS();
+  fitChord(st, stf, sizeof(stf), CX, 72, 'C');
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(stCol, COL_BG);
+  canvas.drawString(stf, CX, 72);
+
+  canvas.drawFastHLine(CX - 74, 90, 148, COL_RING);
+
+  // stats
+  char cbuf[16], tbuf[16], abuf[12];
+  if (s.context_tokens > 0) fmtTokens(s.context_tokens, cbuf, sizeof(cbuf)); else strlcpy(cbuf, "-", sizeof(cbuf));
+  if (s.total_tokens   > 0) fmtTokens(s.total_tokens,   tbuf, sizeof(tbuf)); else strlcpy(tbuf, "-", sizeof(tbuf));
+  snprintf(abuf, sizeof(abuf), "%d", s.sub_agents);
+  detailStat(110, "context", cbuf, COL_INK);
+  detailStat(134, "total",   tbuf, COL_INK);
+  detailStat(158, "agents",  abuf, s.sub_agents > 0 ? COL_AMBER : COL_GRAY);
+
+  useS();
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("press: back", CX, 198);
   canvas.pushSprite(0, 0);
 }
 
@@ -1396,6 +1502,7 @@ static void redraw() {
   switch (appState) {
     case IDLE:         drawIdle();         break;
     case SESSION_LIST: drawSessionList(); break;
+    case DETAIL:       drawDetail();      break;
     case PERMISSION:   drawPermission();  break;
     case CONFIRMING:   drawConfirming();  break;
     case MODE_MENU:    drawModeMenu();    break;
@@ -1521,11 +1628,17 @@ static void handleEncoder(int delta) {
   }
 
   switch (appState) {
-    case SESSION_LIST:
-      listScrollOffset += (delta > 0) ? 1 : -1;
-      if (listScrollOffset < 0) listScrollOffset = 0;
+    case SESSION_LIST: {
+      // Move the selection caret (scroll follows it in drawSessionList).
+      int n = activeSessions();
+      if (n > 0) {
+        rosterSel += (delta > 0) ? 1 : -1;
+        if (rosterSel < 0)  rosterSel = 0;
+        if (rosterSel >= n) rosterSel = n - 1;
+      }
       needsRedraw = true;
       break;
+    }
     case PERMISSION:
       if (permCmdView) {                        // reader: scroll the command (clamped in draw)
         permCmdScroll += (delta > 0) ? 1 : -1;
@@ -1575,10 +1688,23 @@ static void handleEncoder(int delta) {
 static void handlePress() {
   switch (appState) {
     case IDLE:
+      // Nothing to confirm on the clock. (Long-press opens the mode menu.)
+      break;
+
     case SESSION_LIST:
-      // Monitor views have nothing to confirm — the roster auto-shows when
-      // agents exist, and permission requests take over the screen on their own.
-      // (Long-press still opens the mode menu.)
+      // Drill into the selected conversation's detail view.
+      if (rosterSelSid[0]) {
+        strlcpy(detailSid, rosterSelSid, sizeof(detailSid));
+        playEarcon(SND_TICK);
+        appState    = DETAIL;
+        needsRedraw = true;
+      }
+      break;
+
+    case DETAIL:                             // back to the roster
+      playEarcon(SND_TICK);
+      appState    = homeView();
+      needsRedraw = true;
       break;
 
     case PERMISSION: {
@@ -1961,7 +2087,7 @@ void loop() {
   if (appState == CONFIRMING && millis() - lastFast > 100) {   // animate the undo arc
     lastFast = millis(); needsRedraw = true;
   }
-  if (appState == SESSION_LIST && millis() - lastFast > 150) {
+  if ((appState == SESSION_LIST || appState == DETAIL) && millis() - lastFast > 150) {
     lastFast = millis();
     bool anyWorking = false, anyWaiting = false;
     for (int i = 0; i < MAX_SESSIONS; i++) {
