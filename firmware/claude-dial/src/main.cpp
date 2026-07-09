@@ -91,6 +91,7 @@ static inline void useL();
 #define COL_HOT         ((uint32_t)0xFF7A18)   // needs-you / urgent — the 2nd temperature
 #define COL_AMBER_HOT   ((uint32_t)0xFFC46B)   // soft warning / usage mid-range
 #define COL_RED         ((uint32_t)0xFF5B34)   // reject
+#define COL_GREEN       ((uint32_t)0x35D07F)   // success flash (commit / tests pass)
 #define COL_RING        ((uint32_t)0x2A2318)   // dim bezel ring
 #define COL_ARC_OFF     ((uint32_t)0x140F08)   // spent countdown-arc dots
 #define COL_CONFIRM_BG  COL_BG
@@ -167,6 +168,8 @@ static void drawSessionList();
 static void drawDetail();
 static void drawGlobalStats();
 static void drawHistory();
+static void drawEventFlash();
+static void wakeScreen();
 static void drawTracked(const char* s, int cx, int y, int extra);
 static void drawPermission();
 static void drawConfirming();
@@ -237,6 +240,10 @@ static float todayCost = 0;   // today's spend (USD), from the usage message
 static int   budgetPct = 0;   // today's spend as % of the daily budget (0 = no budget)
 static int   etaMins   = 0;   // burn forecast: minutes until the 5h limit (0 = n/a)
 static int   diffAdded = 0, diffRemoved = 0, diffFiles = 0;  // today's edit volume
+static uint32_t flashUntil = 0;      // event glance-flash active until this millis()
+static long     lastFlashEpoch = 0;  // dedup: flash each event epoch exactly once
+static char     flashKind[16] = {0};
+static char     flashLabel[24] = {0};
 
 // Display brightness (0-255), adjustable from the menu, persisted in NVS.
 static uint8_t   brightness = 180;
@@ -519,6 +526,17 @@ static void handleRxMessage(const char* data, uint16_t len) {
     diffAdded   = doc["diff_added"]   | 0;
     diffRemoved = doc["diff_removed"] | 0;
     diffFiles   = doc["diff_files"]   | 0;
+    // one-shot glance-flash for a commit / test result — dedup by epoch
+    long evEpoch = doc["event_epoch"] | 0;
+    const char* evKind = doc["event"] | "";
+    if (evEpoch != 0 && evEpoch != lastFlashEpoch && evKind[0]) {
+      lastFlashEpoch = evEpoch;
+      strlcpy(flashKind, evKind, sizeof(flashKind));
+      strlcpy(flashLabel, doc["event_label"] | "", sizeof(flashLabel));
+      flashUntil = millis() + 2500;
+      wakeScreen();  // a celebration should wake the dial
+      playEarcon(strcmp(flashKind, "test_fail") == 0 ? SND_ERROR : SND_DONE);
+    }
     needsRedraw = true;
     return;
   }
@@ -2224,6 +2242,28 @@ void setup() {
 // ─────────────────────────────────────────────────────────────────────────────
 // loop()
 // ─────────────────────────────────────────────────────────────────────────────
+// A brief full-screen celebration when a commit lands or tests run: a coloured
+// disc with a check (green) or cross (red) and the caption.
+static void drawEventFlash() {
+  canvas.fillScreen(COL_BG);
+  bool ok = strcmp(flashKind, "test_fail") != 0;
+  uint32_t col = ok ? COL_GREEN : COL_RED;
+  int cx = CX, cy = CY - 14;
+  canvas.fillSmoothCircle(cx, cy, 36, col);
+  if (ok) {                                  // check mark, in the bg colour
+    canvas.drawWideLine(cx - 15, cy + 1,  cx - 4, cy + 12, 4, COL_BG);
+    canvas.drawWideLine(cx - 4,  cy + 12, cx + 17, cy - 11, 4, COL_BG);
+  } else {                                   // cross
+    canvas.drawWideLine(cx - 13, cy - 13, cx + 13, cy + 13, 4, COL_BG);
+    canvas.drawWideLine(cx + 13, cy - 13, cx - 13, cy + 13, 4, COL_BG);
+  }
+  useM();
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(col, COL_BG);
+  canvas.drawString(flashLabel, CX, CY + 48);
+  canvas.pushSprite(0, 0);
+}
+
 void loop() {
   M5Dial.update();
 
@@ -2432,6 +2472,13 @@ void loop() {
     wasBreathing = false;
   }
 
-  if (needsRedraw && !screenAsleep) redraw();
+  static bool wasFlashing = false;
+  if (millis() < flashUntil) {
+    drawEventFlash();                                  // celebration overrides the normal screen
+    wasFlashing = true;
+  } else {
+    if (wasFlashing) { wasFlashing = false; needsRedraw = true; }  // restore when it ends
+    if (needsRedraw && !screenAsleep) redraw();
+  }
   delay(10);
 }
