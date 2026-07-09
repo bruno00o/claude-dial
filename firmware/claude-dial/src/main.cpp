@@ -111,6 +111,8 @@ struct Session {
   float cost_usd;       // cumulative USD cost for this conversation
   char  model[24];      // short model name, e.g. "sonnet-4-6"
   bool  errored;        // the most recent tool call in this conversation failed
+  long  elapsed_secs;   // seconds since the bridge first saw this session
+  int   cache_pct;      // % of input tokens served from cache (the cache saver)
   bool  active;
 };
 
@@ -231,6 +233,8 @@ static char  dialId[20] = "";
 // How full the 5h usage window is (0..100), pushed by the bridge — fills the
 // rim gauge. Cleared on disconnect.
 static int   usagePct = 0;
+static float todayCost = 0;   // today's spend (USD), from the usage message
+static int   budgetPct = 0;   // today's spend as % of the daily budget (0 = no budget)
 
 // Display brightness (0-255), adjustable from the menu, persisted in NVS.
 static uint8_t   brightness = 180;
@@ -507,6 +511,8 @@ static void handleRxMessage(const char* data, uint16_t len) {
     usagePct = doc["pct"] | 0;
     if (usagePct < 0) usagePct = 0;
     if (usagePct > 100) usagePct = 100;
+    todayCost = doc["today_cost"] | 0.0f;
+    budgetPct = doc["budget_pct"] | 0;
     needsRedraw = true;
     return;
   }
@@ -555,6 +561,8 @@ static void handleRxMessage(const char* data, uint16_t len) {
   sessions[idx].cost_usd       = doc["cost_usd"]       | 0.0f;
   strlcpy(sessions[idx].model, doc["model"] | "", sizeof(sessions[idx].model));
   sessions[idx].errored        = doc["errored"] | false;
+  sessions[idx].elapsed_secs   = doc["elapsed_secs"] | 0;
+  sessions[idx].cache_pct      = doc["cache_pct"]    | 0;
 
   if (strcmp(state, "permission_request") == 0) {
     bool isNew = !permInQueue(sid) && strcmp(currentPermSid, sid) != 0;
@@ -1066,6 +1074,14 @@ static void detailStat(int y, const char* label, const char* value, uint32_t vco
 // DETAIL: the per-session drill-in reached by pressing a roster row. Shows what
 // that one conversation is doing — its context fill (also on the rim), spend, and
 // the sub-agents it has spawned — the "select a session, see its agents" view.
+// Compact elapsed readout: 45s / 4m / 1h20m.
+static void fmtElapsed(long s, char* buf, size_t n) {
+  if (s <= 0)        { buf[0] = 0; return; }
+  if (s < 60)        snprintf(buf, n, "%lds", s);
+  else if (s < 3600) snprintf(buf, n, "%ldm", s / 60);
+  else               snprintf(buf, n, "%ldh%ldm", s / 3600, (s % 3600) / 60);
+}
+
 static void drawDetail() {
   int idx = findSession(detailSid);
   if (idx < 0 || !sessions[idx].active) {   // the session ended while we were in here
@@ -1107,25 +1123,33 @@ static void drawDetail() {
 
   canvas.drawFastHLine(CX - 74, 88, 148, COL_RING);
 
-  // stats: context / total tokens / dollar cost / sub-agents
-  char cbuf[16], tbuf[16], dbuf[16], abuf[12];
+  // stats: context (reddens under pressure) / total / cost / cache / agents|model
+  char cbuf[16], tbuf[16], dbuf[16], abuf[12], chbuf[12];
   if (s.context_tokens > 0) fmtTokens(s.context_tokens, cbuf, sizeof(cbuf)); else strlcpy(cbuf, "-", sizeof(cbuf));
   if (s.total_tokens   > 0) fmtTokens(s.total_tokens,   tbuf, sizeof(tbuf)); else strlcpy(tbuf, "-", sizeof(tbuf));
   if (s.cost_usd > 0)       snprintf(dbuf, sizeof(dbuf), "$%.2f", s.cost_usd); else strlcpy(dbuf, "-", sizeof(dbuf));
+  if (s.cache_pct > 0)      snprintf(chbuf, sizeof(chbuf), "%d%%", s.cache_pct); else strlcpy(chbuf, "-", sizeof(chbuf));
   snprintf(abuf, sizeof(abuf), "%d", s.sub_agents);
-  detailStat(106, "context", cbuf, COL_INK);
-  detailStat(128, "total",   tbuf, COL_INK);
-  detailStat(150, "cost",    dbuf, COL_AMBER_HOT);
-  // 4th row is adaptive: sub-agents when this conversation delegated any (the
-  // interesting case), otherwise the model it's running on (always useful).
-  if (s.sub_agents > 0)      detailStat(172, "agents", abuf, COL_AMBER);
-  else if (s.model[0])       detailStat(172, "model",  s.model, COL_INK);
-  else                       detailStat(172, "agents", abuf, COL_GRAY);
 
+  // context-pressure alert: value goes warm ≥70%, red ≥85%, and the label gains a "!"
+  uint32_t ctxCol = s.context_pct >= 85 ? COL_RED : (s.context_pct >= 70 ? COL_AMBER_HOT : COL_INK);
+  detailStat(98,  s.context_pct >= 85 ? "context!" : "context", cbuf, ctxCol);
+  detailStat(118, "total", tbuf, COL_INK);
+  detailStat(138, "cost",  dbuf, COL_AMBER_HOT);
+  detailStat(158, "cache", chbuf, s.cache_pct >= 50 ? COL_AMBER : COL_INK);
+  if (s.sub_agents > 0)      detailStat(178, "agents", abuf, COL_AMBER);
+  else if (s.model[0])       detailStat(178, "model",  s.model, COL_INK);
+  else                       detailStat(178, "agents", abuf, COL_GRAY);
+
+  // footer: elapsed since first seen + back hint
+  char el[12], ft[28];
+  fmtElapsed(s.elapsed_secs, el, sizeof(el));
+  if (el[0]) snprintf(ft, sizeof(ft), "%s / press: back", el);
+  else       strlcpy(ft, "press: back", sizeof(ft));
   useS();
   canvas.setTextDatum(middle_center);
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("press: back", CX, 200);
+  canvas.drawString(ft, CX, 200);
   canvas.pushSprite(0, 0);
 }
 
@@ -1153,16 +1177,28 @@ static void drawGlobalStats() {
   canvas.drawString("global", CX, 56);
   canvas.drawFastHLine(CX - 62, 74, 124, COL_RING);
 
-  char sb[12], tb[16], db[16];
+  char sb[12], tb[16], db[16], yb[16];
   snprintf(sb, sizeof(sb), "%d", n);
   if (tokTotal  > 0) fmtTokens(tokTotal, tb, sizeof(tb));            else strlcpy(tb, "-", sizeof(tb));
   if (costTotal > 0) snprintf(db, sizeof(db), "$%.2f", costTotal);  else strlcpy(db, "-", sizeof(db));
-  detailStat(100, "sessions", sb, COL_INK);
-  detailStat(126, "tokens",   tb, COL_INK);
-  detailStat(152, "cost",     db, COL_AMBER_HOT);
+  if (todayCost > 0) snprintf(yb, sizeof(yb), "$%.2f", todayCost);  else strlcpy(yb, "-", sizeof(yb));
+  detailStat(96,  "sessions", sb, COL_INK);
+  detailStat(116, "tokens",   tb, COL_INK);
+  detailStat(136, "cost",     db, COL_AMBER_HOT);
+  detailStat(156, "today",    yb, budgetPct >= 100 ? COL_RED : COL_AMBER);
 
+  // daily-budget bar — only when a budget is configured (budgetPct > 0)
+  int hintY = 190;
+  if (budgetPct > 0) {
+    int fill = budgetPct > 100 ? 100 : budgetPct;
+    uint32_t bc = budgetPct >= 100 ? COL_RED : (budgetPct >= 80 ? COL_AMBER_HOT : COL_AMBER);
+    int bw = 120, bx = CX - bw / 2, by = 176;
+    canvas.drawRoundRect(bx, by, bw, 6, 3, COL_RING);
+    canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * fill / 100, 4, 2, bc);
+    hintY = 196;
+  }
   useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("press: recent", CX, 198);
+  canvas.drawString("press: recent", CX, hintY);
   canvas.pushSprite(0, 0);
 }
 
@@ -2357,6 +2393,24 @@ void loop() {
              millis() - lastInteraction > SLEEP_AFTER_MS) {
     M5Dial.Display.setBrightness(0);   // veille: screen off
     screenAsleep = true;
+  }
+
+  // Breathing idle: a slow daylight backlight swell when the desk is calm — alive
+  // but not distracting. Night mode dims/sleeps instead, so only when not night.
+  static uint32_t lastBreath = 0;
+  static bool wasBreathing = false;
+  bool breathe = appState == IDLE && !screenAsleep && !nightActive() && !anyBusy;
+  if (breathe) {
+    if (millis() - lastBreath > 40) {
+      lastBreath = millis();
+      float k = 0.82f + 0.18f * (0.5f + 0.5f * sinf((millis() % 4000) / 4000.0f * 6.2832f));
+      int b = (int)(brightness * k); if (b < 8) b = 8;
+      M5Dial.Display.setBrightness((uint8_t)b);
+    }
+    wasBreathing = true;
+  } else if (wasBreathing) {
+    applyBrightness();   // restore the steady level when the calm ends
+    wasBreathing = false;
   }
 
   if (needsRedraw && !screenAsleep) redraw();
