@@ -49,7 +49,7 @@ func (s Stats) Pct() int { return int(s.Fraction*100 + 0.5) }
 type SessionUsage struct {
 	Total     int64   // cumulative "work" tokens (input+output+cache_creation) over all turns
 	Context   int64   // tokens resident in the context window at the last main-thread assistant turn
-	SubAgents int     // Task sub-agents spawned (count of Task tool_use blocks in the transcript)
+	SubAgents int     // sub-agents spawned (count of this conversation's agent-*.jsonl transcripts)
 	Cost      float64 // cumulative USD cost for this conversation (ccusage-style, all turns)
 	Model     string  // the last main-thread assistant model (e.g. "claude-sonnet-4-6")
 	LastError bool    // the most recent tool result in the transcript was an error
@@ -216,6 +216,17 @@ func peak5h(events []event) int64 {
 func (r *Reader) collect(since time.Time) ([]event, map[string]SessionUsage, error) {
 	var events []event
 	per := make(map[string]SessionUsage)
+	// Sub-agents run in their own agent-*.jsonl transcripts, each tagged with the
+	// parent conversation's sessionId. Roll them onto the parent: count them, and
+	// fold their token + dollar spend into the conversation's totals. This is
+	// spawn-mechanism-agnostic — Task, Agent, and Workflow all produce these files
+	// — where counting tool_use blocks missed Workflow entirely.
+	type rollup struct {
+		count int
+		total int64
+		cost  float64
+	}
+	agents := make(map[string]rollup)
 	err := filepath.WalkDir(r.dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || filepath.Ext(path) != ".jsonl" {
 			return nil
@@ -225,13 +236,52 @@ func (r *Reader) collect(since time.Time) ([]event, map[string]SessionUsage, err
 		}
 		var su SessionUsage
 		events, su = scanFile(events, path, since)
-		per[strings.TrimSuffix(filepath.Base(path), ".jsonl")] = su
+		base := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+		if strings.HasPrefix(base, "agent-") {
+			if parent := parentSessionID(path); parent != "" {
+				a := agents[parent]
+				a.count++
+				a.total += su.Total
+				a.cost += su.Cost
+				agents[parent] = a
+			}
+			return nil // a sub-agent, not a conversation of its own
+		}
+		per[base] = su
 		return nil
 	})
+	for parent, a := range agents { // merge sub-agent rollups onto their parents
+		su := per[parent]
+		su.SubAgents += a.count
+		su.Total += a.total
+		su.Cost += a.cost
+		per[parent] = su
+	}
 	if os.IsNotExist(err) {
 		return events, per, nil // no transcripts yet → zero usage, not an error
 	}
 	return events, per, err
+}
+
+// parentSessionID reads a sub-agent transcript's parent conversation id from the
+// "sessionId" every agent-*.jsonl line carries. Only the first line is needed.
+func parentSessionID(path string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	if sc.Scan() {
+		var h struct {
+			SessionID string `json:"sessionId"`
+		}
+		if json.Unmarshal(sc.Bytes(), &h) == nil {
+			return h.SessionID
+		}
+	}
+	return ""
 }
 
 // lineUsage is the minimal shape we parse out of each transcript line.
@@ -251,31 +301,6 @@ type lineUsage struct {
 		// RawMessage captures either without failing the token parse.
 		Content json.RawMessage `json:"content"`
 	} `json:"message"`
-}
-
-// countTaskBlocks counts Task tool_use blocks in an assistant turn's content — one
-// per sub-agent this turn spawned. Content that isn't a JSON array (user string
-// turns) yields 0, so it never disturbs token parsing.
-func countTaskBlocks(content json.RawMessage) int {
-	if len(content) == 0 || content[0] != '[' {
-		return 0
-	}
-	var blocks []struct {
-		Type string `json:"type"`
-		Name string `json:"name"`
-	}
-	if json.Unmarshal(content, &blocks) != nil {
-		return 0
-	}
-	n := 0
-	for _, b := range blocks {
-		// Sub-agents are spawned by the Task tool in Claude Code; the Agent tool
-		// (and its aliases in some harnesses) does the same. Count either.
-		if b.Type == "tool_use" && (b.Name == "Task" || b.Name == "Agent") {
-			n++
-		}
-	}
-	return n
 }
 
 // workTokens is what the 5h QUOTA gauge (and cumulative per-conversation spend)
@@ -349,8 +374,9 @@ func scanFile(events []event, path string, since time.Time) ([]event, SessionUsa
 					if l.Message.Model != "" && l.Message.Model != "<synthetic>" {
 						su.Model = l.Message.Model // last real model wins
 					}
-					// Sub-agents are launched from the main thread via the Task tool.
-					su.SubAgents += countTaskBlocks(l.Message.Content)
+					// Sub-agents are counted in collect() from their own agent-*.jsonl
+					// transcripts (which capture Task, Agent, and Workflow spawns alike),
+					// not from tool_use blocks here.
 				}
 			}
 		}

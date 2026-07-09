@@ -219,28 +219,34 @@ func asstWithContent(ts time.Time, blocks []map[string]any) map[string]any {
 func TestSubAgentCount(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Date(2026, 7, 2, 12, 0, 0, 0, time.UTC)
+	// Parent conversation: one assistant turn worth 100 work tokens.
 	writeLines(t, dir, "s.jsonl", []map[string]any{
-		// a user turn whose content is a plain STRING — must not break parsing
 		{"type": "user", "timestamp": now.Add(-9 * time.Minute).UTC().Format(time.RFC3339Nano),
 			"message": map[string]any{"role": "user", "content": "go do the thing"}},
-		// an assistant turn that spawns two sub-agents in one turn
-		asstWithContent(now.Add(-8*time.Minute), []map[string]any{
-			{"type": "text", "text": "spawning"},
-			{"type": "tool_use", "name": "Task", "input": map[string]any{"subagent_type": "explorer"}},
-			{"type": "tool_use", "name": "Task", "input": map[string]any{"subagent_type": "coder"}},
-		}),
-		// another turn, one more sub-agent + an unrelated tool
-		asstWithContent(now.Add(-5*time.Minute), []map[string]any{
-			{"type": "tool_use", "name": "Bash", "input": map[string]any{"command": "ls"}},
-			{"type": "tool_use", "name": "Task", "input": map[string]any{"subagent_type": "reviewer"}},
-		}),
+		{"type": "assistant", "timestamp": now.Add(-8 * time.Minute).UTC().Format(time.RFC3339Nano),
+			"message": map[string]any{"role": "assistant", "model": "claude-sonnet-4-6",
+				"usage": map[string]any{"input_tokens": 100, "output_tokens": 0}}},
 	})
+	// Two sub-agents, each in its own agent-*.jsonl tagged with the parent
+	// sessionId — whatever spawned them (Task / Agent / Workflow) is irrelevant.
+	for i, id := range []string{"agent-aaa", "agent-bbb"} {
+		writeLines(t, dir, id+".jsonl", []map[string]any{
+			{"type": "assistant", "isSidechain": true, "sessionId": "s",
+				"timestamp": now.Add(time.Duration(-7+i) * time.Minute).UTC().Format(time.RFC3339Nano),
+				"message": map[string]any{"role": "assistant", "model": "claude-sonnet-4-6",
+					"usage": map[string]any{"input_tokens": 50, "output_tokens": 0}}},
+		})
+	}
 
 	r := NewReader(dir, 0)
 	if err := r.Refresh(now); err != nil {
 		t.Fatal(err)
 	}
-	if got := r.PerSession()["s"].SubAgents; got != 3 {
-		t.Errorf("SubAgents = %d, want 3 (Task blocks; string content must not break parsing)", got)
+	su := r.PerSession()["s"]
+	if su.SubAgents != 2 {
+		t.Errorf("SubAgents = %d, want 2 (one per agent-*.jsonl tagged to this conversation)", su.SubAgents)
+	}
+	if su.Total != 200 { // parent 100 + two sub-agents × 50, rolled up
+		t.Errorf("Total = %d, want 200 (parent + sub-agent spend rolled up)", su.Total)
 	}
 }
