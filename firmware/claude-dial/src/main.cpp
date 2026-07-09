@@ -92,6 +92,11 @@ static inline void useL();
 #define COL_AMBER_HOT   ((uint32_t)0xFFC46B)   // soft warning / usage mid-range
 #define COL_RED         ((uint32_t)0xFF5B34)   // reject
 #define COL_GREEN       ((uint32_t)0x35D07F)   // success flash (commit / tests pass)
+// Per-project palette: each repo hashes to one of these, for a colour dot on the roster.
+static const uint32_t PROJECT_COLORS[12] = {
+  0xFFB000, 0x35D07F, 0x4FA3FF, 0xFF6FB5, 0xC77DFF, 0x00C2C7,
+  0xFF8A3D, 0x9BE564, 0xFFD23F, 0x7AA2FF, 0xFF5B6E, 0xB0B7C3,
+};
 #define COL_RING        ((uint32_t)0x2A2318)   // dim bezel ring
 #define COL_ARC_OFF     ((uint32_t)0x140F08)   // spent countdown-arc dots
 #define COL_CONFIRM_BG  COL_BG
@@ -114,6 +119,8 @@ struct Session {
   bool  errored;        // the most recent tool call in this conversation failed
   long  elapsed_secs;   // seconds since the bridge first saw this session
   int   cache_pct;      // % of input tokens served from cache (the cache saver)
+  bool  stuck;          // working the same command too long (hung / loop)
+  int   color_idx;      // per-project colour palette index
   bool  active;
 };
 
@@ -240,6 +247,7 @@ static float todayCost = 0;   // today's spend (USD), from the usage message
 static int   budgetPct = 0;   // today's spend as % of the daily budget (0 = no budget)
 static int   etaMins   = 0;   // burn forecast: minutes until the 5h limit (0 = n/a)
 static int   diffAdded = 0, diffRemoved = 0, diffFiles = 0;  // today's edit volume
+static char  activity[26] = {0};     // 24h today heatmap, one char/hour ('0'..'9')
 static uint32_t flashUntil = 0;      // event glance-flash active until this millis()
 static long     lastFlashEpoch = 0;  // dedup: flash each event epoch exactly once
 static char     flashKind[16] = {0};
@@ -526,6 +534,7 @@ static void handleRxMessage(const char* data, uint16_t len) {
     diffAdded   = doc["diff_added"]   | 0;
     diffRemoved = doc["diff_removed"] | 0;
     diffFiles   = doc["diff_files"]   | 0;
+    strlcpy(activity, doc["activity"] | "", sizeof(activity));
     // one-shot glance-flash for a commit / test result — dedup by epoch
     long evEpoch = doc["event_epoch"] | 0;
     const char* evKind = doc["event"] | "";
@@ -587,6 +596,8 @@ static void handleRxMessage(const char* data, uint16_t len) {
   sessions[idx].errored        = doc["errored"] | false;
   sessions[idx].elapsed_secs   = doc["elapsed_secs"] | 0;
   sessions[idx].cache_pct      = doc["cache_pct"]    | 0;
+  sessions[idx].stuck          = doc["stuck"]        | false;
+  sessions[idx].color_idx      = doc["color_idx"]    | 0;
 
   if (strcmp(state, "permission_request") == 0) {
     bool isNew = !permInQueue(sid) && strcmp(currentPermSid, sid) != 0;
@@ -1049,7 +1060,7 @@ static void drawSessionList() {
 
     canvas.setTextColor(col, COL_BG);
     canvas.setTextDatum(middle_left);
-    uint32_t gCol = s.errored ? COL_RED : col;       // error sniffer: red status glyph
+    uint32_t gCol = (s.errored || s.stuck) ? COL_RED : col;  // red glyph on error or stuck
     if (waiting) {                                   // needs-you: a hot filled triangle
       canvas.fillTriangle(CX - 90, y - 5, CX - 90, y + 5, CX - 82, y, gCol);
     } else if (working) {                            // working: a smooth spinning C-arc
@@ -1058,6 +1069,7 @@ static void drawSessionList() {
     } else {                                          // idle: a soft AA dot
       canvas.fillSmoothCircle(CX - 88, y, 2, gCol);
     }
+    canvas.setTextColor(PROJECT_COLORS[s.color_idx % 12], COL_BG);  // per-project colour identity
     canvas.drawString(lf, CX - 70, y);
     if (tok[0]) {                                    // dim per-conversation token count
       canvas.setTextDatum(middle_right);
@@ -1137,13 +1149,14 @@ static void drawDetail() {
   bool working = strcmp(s.state, "working") == 0;
   bool waiting = strcmp(s.state, "blocked") == 0 || strcmp(s.state, "permission_request") == 0;
   uint32_t stCol = working ? COL_AMBER : (waiting ? COL_HOT : COL_GRAY);
+  if (s.stuck) stCol = COL_RED;                    // stuck detector: flag a hung/looping session
   char st[48], stf[32];
   if (s.tool_name[0]) {
     char tl[24]; strlcpy(tl, s.tool_name, sizeof(tl));
     for (char* p = tl; *p; p++) *p = tolower(*p);
-    snprintf(st, sizeof(st), "%s - %s", s.state, tl);
+    snprintf(st, sizeof(st), "%s - %s%s", s.state, tl, s.stuck ? " stuck?" : "");
   } else {
-    strlcpy(st, s.state, sizeof(st));
+    snprintf(st, sizeof(st), "%s%s", s.state, s.stuck ? " stuck?" : "");
   }
   useS();
   fitChord(st, stf, sizeof(stf), CX, 72, 'C');
@@ -1213,29 +1226,32 @@ static void drawGlobalStats() {
   snprintf(sb, sizeof(sb), "%d", n);
   if (tokTotal  > 0) fmtTokens(tokTotal, tb, sizeof(tb));          else strlcpy(tb, "-", sizeof(tb));
   if (todayCost > 0) snprintf(yb, sizeof(yb), "$%.2f", todayCost); else strlcpy(yb, "-", sizeof(yb));
-  detailStat(96,  "sessions", sb, COL_INK);
-  detailStat(116, "tokens",   tb, COL_INK);
-  detailStat(136, "today",    yb, budgetPct >= 100 ? COL_RED : COL_AMBER);
+  // today $ shows a "!" and reddens once over the daily budget (bar dropped for the strip)
+  char yf[20]; snprintf(yf, sizeof(yf), "%s%s", yb, budgetPct >= 100 ? " !" : "");
+  detailStat(94,  "sessions", sb, COL_INK);
+  detailStat(112, "tokens",   tb, COL_INK);
+  detailStat(130, "today",    yf, budgetPct >= 100 ? COL_RED : COL_AMBER);
 
   // diff of the day — today's edit volume (from Edit/Write tool inputs)
   if (diffAdded > 0 || diffRemoved > 0) {
     char dl[28]; snprintf(dl, sizeof(dl), "+%d -%d  %df", diffAdded, diffRemoved, diffFiles);
     useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_AMBER, COL_BG);
-    canvas.drawString(dl, CX, 158);
+    canvas.drawString(dl, CX, 150);
   }
 
-  // daily-budget bar — only when a budget is configured (budgetPct > 0)
-  int hintY = 190;
-  if (budgetPct > 0) {
-    int fill = budgetPct > 100 ? 100 : budgetPct;
-    uint32_t bc = budgetPct >= 100 ? COL_RED : (budgetPct >= 80 ? COL_AMBER_HOT : COL_AMBER);
-    int bw = 120, bx = CX - bw / 2, by = 176;
-    canvas.drawRoundRect(bx, by, bw, 6, 3, COL_RING);
-    canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * fill / 100, 4, 2, bc);
-    hintY = 196;
+  // 24h activity strip — today's work rhythm (the "today card" signature)
+  if (activity[0]) {
+    const int baseY = 178, maxH = 16, bx0 = CX - 72;
+    for (int h = 0; h < 24; h++) {
+      int v = activity[h] - '0'; if (v < 0) v = 0; if (v > 9) v = 9;
+      int bh = v * maxH / 9;
+      if (bh <= 0) canvas.fillRect(bx0 + h * 6, baseY - 1, 4, 1, COL_RING);
+      else         canvas.fillRect(bx0 + h * 6, baseY - bh, 4, bh, v >= 6 ? COL_AMBER : COL_AMBER_HOT);
+    }
   }
+
   useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("press: recent", CX, hintY);
+  canvas.drawString("press: recent", CX, 196);
   canvas.pushSprite(0, 0);
 }
 
