@@ -68,6 +68,12 @@ type Snapshot struct {
 	// the configured daily budget (0 when no budget is set).
 	TodayCost float64 `json:"today_cost,omitempty"`
 	BudgetPct int     `json:"budget_pct,omitempty"`
+	// EtaMins is the burn forecast: minutes until the 5h budget is hit (0 = n/a).
+	EtaMins int `json:"eta_mins,omitempty"`
+	// Today's edit volume, from Edit/Write tool inputs since local midnight.
+	DiffAdded   int `json:"diff_added,omitempty"`
+	DiffRemoved int `json:"diff_removed,omitempty"`
+	DiffFiles   int `json:"diff_files,omitempty"`
 }
 
 // Outbound is a single host -> device message (an RX write on the firmware).
@@ -100,9 +106,14 @@ type Outbound struct {
 	Version  string `json:"version,omitempty"`
 	Host     string `json:"host,omitempty"` // the bridge's machine name, shown on the Dial
 	Pct      int    `json:"pct,omitempty"`  // usage gauge fill (0..100)
-	// carried on the {"type":"usage"} message: today's spend and its % of budget.
-	TodayCost float64 `json:"today_cost,omitempty"`
-	BudgetPct int     `json:"budget_pct,omitempty"`
+	// carried on the {"type":"usage"} message: today's spend and its % of budget,
+	// the burn-forecast ETA, and today's edit volume.
+	TodayCost   float64 `json:"today_cost,omitempty"`
+	BudgetPct   int     `json:"budget_pct,omitempty"`
+	EtaMins     int     `json:"eta_mins,omitempty"`
+	DiffAdded   int     `json:"diff_added,omitempty"`
+	DiffRemoved int     `json:"diff_removed,omitempty"`
+	DiffFiles   int     `json:"diff_files,omitempty"`
 }
 
 // Decision is a device -> host message: the user's answer on the dial.

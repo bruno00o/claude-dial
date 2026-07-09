@@ -40,6 +40,67 @@ type Stats struct {
 	Tokens   int64   // work tokens in the trailing 5h window
 	Budget   int64   // denominator (explicit override, or self-calibrated peak)
 	Fraction float64 // Tokens/Budget, clamped 0..1
+	EtaMins  int     // at the recent burn rate, minutes until the 5h budget is hit (0 = n/a)
+}
+
+// DiffToday is the edit volume since local midnight, from Edit/Write tool inputs.
+type DiffToday struct {
+	Added, Removed, Files int
+}
+
+// countLines returns the line count of s (0 for empty).
+func countLines(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+// addEdits folds an assistant turn's Edit/Write/MultiEdit tool_use blocks into the
+// running day diff: added/removed line counts and the set of touched files.
+func addEdits(content json.RawMessage, d *DiffToday, files map[string]bool) {
+	if len(content) == 0 || content[0] != '[' {
+		return
+	}
+	var blocks []struct {
+		Type  string `json:"type"`
+		Name  string `json:"name"`
+		Input struct {
+			FilePath  string `json:"file_path"`
+			OldString string `json:"old_string"`
+			NewString string `json:"new_string"`
+			Content   string `json:"content"`
+			Edits     []struct {
+				OldString string `json:"old_string"`
+				NewString string `json:"new_string"`
+			} `json:"edits"`
+		} `json:"input"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return
+	}
+	for _, b := range blocks {
+		if b.Type != "tool_use" {
+			continue
+		}
+		switch b.Name {
+		case "Edit":
+			d.Added += countLines(b.Input.NewString)
+			d.Removed += countLines(b.Input.OldString)
+		case "Write":
+			d.Added += countLines(b.Input.Content)
+		case "MultiEdit":
+			for _, e := range b.Input.Edits {
+				d.Added += countLines(e.NewString)
+				d.Removed += countLines(e.OldString)
+			}
+		default:
+			continue
+		}
+		if b.Input.FilePath != "" {
+			files[b.Input.FilePath] = true
+		}
+	}
 }
 
 // Pct returns the gauge fill as a 0..100 integer.
@@ -104,6 +165,7 @@ type Reader struct {
 	mu         sync.RWMutex
 	latest     Stats
 	perSession map[string]SessionUsage
+	diffToday  DiffToday
 }
 
 // NewReader reads transcripts from dir (empty → ~/.claude/projects). budgetTokens
@@ -134,6 +196,13 @@ func (r *Reader) PerSession() map[string]SessionUsage {
 	return r.perSession
 }
 
+// DiffToday returns today's edit volume (added/removed lines, files touched).
+func (r *Reader) DiffToday() DiffToday {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.diffToday
+}
+
 // Run refreshes now and then every interval until ctx is cancelled.
 func (r *Reader) Run(ctx context.Context, interval time.Duration) {
 	_ = r.Refresh(time.Now())
@@ -157,7 +226,7 @@ type event struct {
 // Refresh rescans the transcripts and recomputes Stats as of now.
 func (r *Reader) Refresh(now time.Time) error {
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	events, per, err := r.collect(now.Add(-historyDays*24*time.Hour), dayStart)
+	events, per, diff, err := r.collect(now.Add(-historyDays*24*time.Hour), dayStart)
 	if err != nil {
 		return err
 	}
@@ -186,9 +255,25 @@ func (r *Reader) Refresh(now time.Time) error {
 		}
 	}
 
+	// Burn forecast: at the last 20 minutes' rate, minutes until the budget is hit.
+	etaMins := 0
+	recentCut := now.Add(-20 * time.Minute)
+	var recentTok int64
+	for _, e := range events {
+		if !e.t.Before(recentCut) {
+			recentTok += e.tok
+		}
+	}
+	if recentTok > 0 && current < budget {
+		if ratePerMin := float64(recentTok) / 20.0; ratePerMin > 0 {
+			etaMins = int(float64(budget-current) / ratePerMin)
+		}
+	}
+
 	r.mu.Lock()
-	r.latest = Stats{Tokens: current, Budget: budget, Fraction: frac}
+	r.latest = Stats{Tokens: current, Budget: budget, Fraction: frac, EtaMins: etaMins}
 	r.perSession = per
+	r.diffToday = diff
 	r.mu.Unlock()
 	return nil
 }
@@ -216,9 +301,11 @@ func peak5h(events []event) int64 {
 // session id (the file's basename). Files not modified within the window can't
 // hold recent events, so we skip them by mtime — the only thing that keeps a
 // full rescan cheap. Both outputs come from one pass over each file.
-func (r *Reader) collect(since, dayStart time.Time) ([]event, map[string]SessionUsage, error) {
+func (r *Reader) collect(since, dayStart time.Time) ([]event, map[string]SessionUsage, DiffToday, error) {
 	var events []event
 	per := make(map[string]SessionUsage)
+	diff := DiffToday{}
+	files := map[string]bool{} // distinct files touched today, across all transcripts
 	// Sub-agents run in their own agent-*.jsonl transcripts, each tagged with the
 	// parent conversation's sessionId. Roll them onto the parent: count them, and
 	// fold their token + dollar spend into the conversation's totals. This is
@@ -238,7 +325,7 @@ func (r *Reader) collect(since, dayStart time.Time) ([]event, map[string]Session
 			return nil // untouched in the window → no recent events
 		}
 		var su SessionUsage
-		events, su = scanFile(events, path, since, dayStart)
+		events, su = scanFile(events, path, since, dayStart, &diff, files)
 		base := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		if strings.HasPrefix(base, "agent-") {
 			if parent := parentSessionID(path); parent != "" {
@@ -260,10 +347,11 @@ func (r *Reader) collect(since, dayStart time.Time) ([]event, map[string]Session
 		su.Cost += a.cost
 		per[parent] = su
 	}
+	diff.Files = len(files)
 	if os.IsNotExist(err) {
-		return events, per, nil // no transcripts yet → zero usage, not an error
+		return events, per, diff, nil // no transcripts yet → zero usage, not an error
 	}
-	return events, per, err
+	return events, per, diff, err
 }
 
 // parentSessionID reads a sub-agent transcript's parent conversation id from the
@@ -335,7 +423,7 @@ func (l lineUsage) costUSD() float64 {
 // scanFile reads one transcript once and returns (a) the in-window quota events
 // appended to events — identical to the old behaviour — and (b) the whole file's
 // per-conversation SessionUsage.
-func scanFile(events []event, path string, since, dayStart time.Time) ([]event, SessionUsage) {
+func scanFile(events []event, path string, since, dayStart time.Time, diff *DiffToday, files map[string]bool) ([]event, SessionUsage) {
 	f, err := os.Open(path)
 	if err != nil {
 		return events, SessionUsage{}
@@ -371,6 +459,9 @@ func scanFile(events []event, path string, since, dayStart time.Time) ([]event, 
 				su.Cost += c
 				if !l.Timestamp.IsZero() && !l.Timestamp.Before(dayStart) {
 					su.TodayCost += c // spend since local midnight, for the daily budget
+					if l.Type == "assistant" {
+						addEdits(l.Message.Content, diff, files) // today's edit volume
+					}
 				}
 				u := l.Message.Usage
 				cacheReadSum += u.CacheRead

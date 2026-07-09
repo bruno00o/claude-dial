@@ -232,11 +232,17 @@ func (d *Daemon) todaySpend() (cost float64, pct int) {
 // broadcast renders the current (enriched) store to the device.
 func (d *Daemon) broadcast() {
 	today, budgetPct := d.todaySpend()
+	st := d.usage.Latest()
+	diff := d.usage.DiffToday()
 	d.dev.Update(protocol.Snapshot{
-		Sessions:  d.enrichedSessions(),
-		UsagePct:  d.usage.Latest().Pct(),
-		TodayCost: today,
-		BudgetPct: budgetPct,
+		Sessions:    d.enrichedSessions(),
+		UsagePct:    st.Pct(),
+		TodayCost:   today,
+		BudgetPct:   budgetPct,
+		EtaMins:     st.EtaMins,
+		DiffAdded:   diff.Added,
+		DiffRemoved: diff.Removed,
+		DiffFiles:   diff.Files,
 	})
 }
 
