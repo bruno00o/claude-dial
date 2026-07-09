@@ -64,6 +64,10 @@ type Daemon struct {
 	// contextMax is the model's max context window (tokens), the denominator for
 	// the per-session context gauge on the rim. Defaults to 1M.
 	contextMax int64
+
+	// dailyBudget is an optional daily spend target (USD). >0 drives the budget
+	// gauge/alert; 0 disables it.
+	dailyBudget float64
 }
 
 // Config tunes the daemon.
@@ -109,6 +113,9 @@ type Config struct {
 	// ContextMax is the model's max context window (tokens) — the denominator for
 	// the per-session context gauge shown on the Dial's rim. 0 defaults to 1M.
 	ContextMax int64
+	// DailyBudget is an optional daily spend target in USD. >0 shows a budget
+	// gauge and alerts when today's spend crosses it.
+	DailyBudget float64
 	// Debug logs every hook event received.
 	Debug bool
 }
@@ -141,6 +148,7 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 		usage:         usage.NewReader(cfg.UsageDir, cfg.UsageBudgetTokens),
 		bridgeVersion: cfg.BridgeVersion,
 		contextMax:    cfg.ContextMax,
+		dailyBudget:   cfg.DailyBudget,
 	}
 	projAliases = loadAliases(cfg.AliasesPath) // project-name → display-name overrides
 	go d.dispatch()
@@ -196,6 +204,7 @@ func (d *Daemon) enrichedSessions() []protocol.SessionView {
 		sessions[i].CostUSD = u.Cost
 		sessions[i].Model = strings.TrimPrefix(u.Model, "claude-") // "claude-sonnet-4-6" → "sonnet-4-6"
 		sessions[i].Errored = u.LastError
+		sessions[i].CachePct = u.CachePct
 		// Context as a % of the model's max context — the rim's gauge.
 		if d.contextMax > 0 {
 			pct := int(u.Context * 100 / d.contextMax)
@@ -208,11 +217,26 @@ func (d *Daemon) enrichedSessions() []protocol.SessionView {
 	return sessions
 }
 
+// todaySpend sums today's dollar spend across conversations and expresses it as a
+// percentage of the daily budget (0 when no budget is configured).
+func (d *Daemon) todaySpend() (cost float64, pct int) {
+	for _, u := range d.usage.PerSession() {
+		cost += u.TodayCost
+	}
+	if d.dailyBudget > 0 {
+		pct = int(cost * 100 / d.dailyBudget)
+	}
+	return cost, pct
+}
+
 // broadcast renders the current (enriched) store to the device.
 func (d *Daemon) broadcast() {
+	today, budgetPct := d.todaySpend()
 	d.dev.Update(protocol.Snapshot{
-		Sessions: d.enrichedSessions(),
-		UsagePct: d.usage.Latest().Pct(),
+		Sessions:  d.enrichedSessions(),
+		UsagePct:  d.usage.Latest().Pct(),
+		TodayCost: today,
+		BudgetPct: budgetPct,
 	})
 }
 

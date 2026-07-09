@@ -69,6 +69,7 @@ type Device struct {
 	hasOTA        bool   // all OTA characteristics were discovered
 	otaAdvertised string // last "update available" version pushed to the Dial (dedup)
 	lastUsagePct  int    // last usage gauge value pushed (-1 = none yet, forces first send)
+	lastBudgetPct int    // last daily-budget % pushed (-1 = none yet)
 	last          map[string]protocol.SessionView
 
 	wmu       sync.Mutex             // serializes all characteristic writes to the device
@@ -108,19 +109,20 @@ func New(debug bool) (*Device, error) {
 		return nil, err
 	}
 	d := &Device{
-		service:      svc,
-		rx:           rx,
-		tx:           tx,
-		otaCtrlU:     otaCtrl,
-		otaDataU:     otaData,
-		otaStatU:     otaStat,
-		debug:        debug,
-		lastUsagePct: -1, // force the first usage push even if it's 0
-		last:         map[string]protocol.SessionView{},
-		pending:      make(chan protocol.Snapshot, 1),
-		decisions:    make(chan protocol.Decision, 32),
-		otaStatus:    make(chan ota.Status, 16),
-		otaReqs:      make(chan struct{}, 1),
+		service:       svc,
+		rx:            rx,
+		tx:            tx,
+		otaCtrlU:      otaCtrl,
+		otaDataU:      otaData,
+		otaStatU:      otaStat,
+		debug:         debug,
+		lastUsagePct:  -1, // force the first usage push even if it's 0
+		lastBudgetPct: -1,
+		last:          map[string]protocol.SessionView{},
+		pending:       make(chan protocol.Snapshot, 1),
+		decisions:     make(chan protocol.Decision, 32),
+		otaStatus:     make(chan ota.Status, 16),
+		otaReqs:       make(chan struct{}, 1),
 	}
 	go d.run()
 	go d.writer()
@@ -268,6 +270,7 @@ func (d *Device) onNotify(buf []byte) {
 			// screen because our diff says "nothing changed".
 			d.last = map[string]protocol.SessionView{}
 			d.lastUsagePct = -1
+			d.lastBudgetPct = -1
 			d.mu.Unlock()
 			d.logf("dial firmware %s (ota=%v)", hello.Firmware, hello.OTA)
 		}
@@ -496,6 +499,8 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 				CostUSD:       s.CostUSD,
 				Model:         s.Model,
 				Errored:       s.Errored,
+				ElapsedSecs:   s.ElapsedSecs,
+				CachePct:      s.CachePct,
 			}) {
 				d.mu.Lock()
 				d.last[s.SessionID] = s
@@ -508,12 +513,13 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 
 	// Usage gauge: push only when the percentage the Dial shows changes.
 	d.mu.Lock()
-	usageChanged := snap.UsagePct != d.lastUsagePct
+	usageChanged := snap.UsagePct != d.lastUsagePct || snap.BudgetPct != d.lastBudgetPct
 	d.mu.Unlock()
 	if usageChanged {
-		if d.write(protocol.Outbound{Type: "usage", Pct: snap.UsagePct}) {
+		if d.write(protocol.Outbound{Type: "usage", Pct: snap.UsagePct, TodayCost: snap.TodayCost, BudgetPct: snap.BudgetPct}) {
 			d.mu.Lock()
 			d.lastUsagePct = snap.UsagePct
+			d.lastBudgetPct = snap.BudgetPct
 			d.mu.Unlock()
 		} else {
 			ok = false

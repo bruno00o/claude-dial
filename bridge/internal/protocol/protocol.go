@@ -55,6 +55,8 @@ type SessionView struct {
 	CostUSD       float64 `json:"cost_usd,omitempty"`       // cumulative USD cost for this conversation (ccusage-style)
 	Model         string  `json:"model,omitempty"`          // short model name, e.g. "sonnet-4-6"
 	Errored       bool    `json:"errored,omitempty"`        // the conversation's most recent tool call failed
+	ElapsedSecs   int     `json:"elapsed_secs,omitempty"`   // seconds since this session first appeared
+	CachePct      int     `json:"cache_pct,omitempty"`      // % of input tokens served from cache (the cache saver)
 }
 
 // Snapshot is the full state pushed to a Device on every change.
@@ -62,6 +64,10 @@ type Snapshot struct {
 	Sessions []SessionView `json:"sessions"`
 	// UsagePct is how full the 5h usage window is (0..100), for the rim gauge.
 	UsagePct int `json:"usage_pct,omitempty"`
+	// TodayCost is total spend since local midnight; BudgetPct is that as a % of
+	// the configured daily budget (0 when no budget is set).
+	TodayCost float64 `json:"today_cost,omitempty"`
+	BudgetPct int     `json:"budget_pct,omitempty"`
 }
 
 // Outbound is a single host -> device message (an RX write on the firmware).
@@ -82,6 +88,8 @@ type Outbound struct {
 	CostUSD       float64 `json:"cost_usd,omitempty"`
 	Model         string  `json:"model,omitempty"`
 	Errored       bool    `json:"errored,omitempty"`
+	ElapsedSecs   int     `json:"elapsed_secs,omitempty"`
+	CachePct      int     `json:"cache_pct,omitempty"`
 
 	// control messages: {"type":"set_time","epoch":…,"tz_offset":…,"host":"…"},
 	// {"type":"ota_available","version":"0.6.0"} (empty version clears the prompt),
@@ -92,6 +100,9 @@ type Outbound struct {
 	Version  string `json:"version,omitempty"`
 	Host     string `json:"host,omitempty"` // the bridge's machine name, shown on the Dial
 	Pct      int    `json:"pct,omitempty"`  // usage gauge fill (0..100)
+	// carried on the {"type":"usage"} message: today's spend and its % of budget.
+	TodayCost float64 `json:"today_cost,omitempty"`
+	BudgetPct int     `json:"budget_pct,omitempty"`
 }
 
 // Decision is a device -> host message: the user's answer on the dial.

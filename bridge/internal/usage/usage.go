@@ -53,6 +53,8 @@ type SessionUsage struct {
 	Cost      float64 // cumulative USD cost for this conversation (ccusage-style, all turns)
 	Model     string  // the last main-thread assistant model (e.g. "claude-sonnet-4-6")
 	LastError bool    // the most recent tool result in the transcript was an error
+	CachePct  int     // % of input tokens served from cache (the cache saver)
+	TodayCost float64 // USD spent by this conversation since local midnight
 }
 
 // lastToolResultError scans a turn's content for tool_result blocks and reports
@@ -154,7 +156,8 @@ type event struct {
 
 // Refresh rescans the transcripts and recomputes Stats as of now.
 func (r *Reader) Refresh(now time.Time) error {
-	events, per, err := r.collect(now.Add(-historyDays * 24 * time.Hour))
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	events, per, err := r.collect(now.Add(-historyDays*24*time.Hour), dayStart)
 	if err != nil {
 		return err
 	}
@@ -213,7 +216,7 @@ func peak5h(events []event) int64 {
 // session id (the file's basename). Files not modified within the window can't
 // hold recent events, so we skip them by mtime — the only thing that keeps a
 // full rescan cheap. Both outputs come from one pass over each file.
-func (r *Reader) collect(since time.Time) ([]event, map[string]SessionUsage, error) {
+func (r *Reader) collect(since, dayStart time.Time) ([]event, map[string]SessionUsage, error) {
 	var events []event
 	per := make(map[string]SessionUsage)
 	// Sub-agents run in their own agent-*.jsonl transcripts, each tagged with the
@@ -235,7 +238,7 @@ func (r *Reader) collect(since time.Time) ([]event, map[string]SessionUsage, err
 			return nil // untouched in the window → no recent events
 		}
 		var su SessionUsage
-		events, su = scanFile(events, path, since)
+		events, su = scanFile(events, path, since, dayStart)
 		base := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		if strings.HasPrefix(base, "agent-") {
 			if parent := parentSessionID(path); parent != "" {
@@ -332,7 +335,7 @@ func (l lineUsage) costUSD() float64 {
 // scanFile reads one transcript once and returns (a) the in-window quota events
 // appended to events — identical to the old behaviour — and (b) the whole file's
 // per-conversation SessionUsage.
-func scanFile(events []event, path string, since time.Time) ([]event, SessionUsage) {
+func scanFile(events []event, path string, since, dayStart time.Time) ([]event, SessionUsage) {
 	f, err := os.Open(path)
 	if err != nil {
 		return events, SessionUsage{}
@@ -340,6 +343,7 @@ func scanFile(events []event, path string, since time.Time) ([]event, SessionUsa
 	defer f.Close()
 
 	var su SessionUsage
+	var cacheReadSum, inputAllSum int64 // for the cache-saver percentage
 	// Transcript lines can be very large (images, long tool output), so read with
 	// an unbounded ReadBytes rather than a fixed-buffer Scanner.
 	br := bufio.NewReader(f)
@@ -363,7 +367,14 @@ func scanFile(events []event, path string, since time.Time) ([]event, SessionUsa
 				// whole file (window-independent). Sub-agent (sidechain) turns are
 				// real spend, so they count here.
 				su.Total += work
-				su.Cost += l.costUSD()
+				c := l.costUSD()
+				su.Cost += c
+				if !l.Timestamp.IsZero() && !l.Timestamp.Before(dayStart) {
+					su.TodayCost += c // spend since local midnight, for the daily budget
+				}
+				u := l.Message.Usage
+				cacheReadSum += u.CacheRead
+				inputAllSum += u.Input + u.CacheCreate + u.CacheRead
 				// Context fill: the LAST main-thread assistant turn's resident input.
 				// Skip sidechain turns — a sub-agent's context is not this
 				// conversation's — and overwrite so the final value wins.
@@ -386,6 +397,9 @@ func scanFile(events []event, path string, since time.Time) ([]event, SessionUsa
 		if err != nil {
 			break
 		}
+	}
+	if inputAllSum > 0 {
+		su.CachePct = int(cacheReadSum * 100 / inputAllSum) // share of input served from cache
 	}
 	return events, su
 }

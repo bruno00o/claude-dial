@@ -17,6 +17,7 @@ type Session struct {
 	Tool    string
 	Command string
 	Updated time.Time
+	Started time.Time // first seen — for the "elapsed" readout
 }
 
 // Store is a concurrency-safe set of sessions, kept in insertion order so the
@@ -36,7 +37,7 @@ func New() *Store {
 func (s *Store) ensure(id, project string) *Session {
 	ss := s.byID[id]
 	if ss == nil {
-		ss = &Session{ID: id, State: protocol.StateIdle}
+		ss = &Session{ID: id, State: protocol.StateIdle, Started: s.now()}
 		s.byID[id] = ss
 		s.order = append(s.order, id)
 	}
@@ -179,12 +180,17 @@ func (s *Store) Snapshot() []protocol.SessionView {
 		if ss == nil {
 			continue
 		}
+		elapsed := 0
+		if !ss.Started.IsZero() {
+			elapsed = int(s.now().Sub(ss.Started) / time.Second)
+		}
 		out = append(out, protocol.SessionView{
-			SessionID: ss.ID,
-			Project:   ss.Project,
-			State:     ss.State,
-			ToolName:  ss.Tool,
-			Command:   ss.Command,
+			SessionID:   ss.ID,
+			Project:     ss.Project,
+			State:       ss.State,
+			ToolName:    ss.Tool,
+			Command:     ss.Command,
+			ElapsedSecs: elapsed,
 		})
 	}
 	return out
