@@ -48,6 +48,80 @@ type DiffToday struct {
 	Added, Removed, Files int
 }
 
+// Event is a notable moment worth a glance-flash on the Dial (a commit landing,
+// a test run passing or failing). Zero value = nothing recent.
+type Event struct {
+	Kind  string    // "commit" | "test_pass" | "test_fail"
+	Label string    // short caption, e.g. "committed"
+	Time  time.Time // when it happened (the resolving tool_result's timestamp)
+}
+
+// isTestCmd reports whether a shell command looks like a test run.
+func isTestCmd(cmd string) bool {
+	for _, m := range []string{"pytest", "npm test", "npm run test", "yarn test", "jest",
+		"vitest", "go test", "cargo test", "rspec", "phpunit", "mvn test", "gradle test",
+		"ctest", "rake test", "bun test", "deno test"} {
+		if strings.Contains(cmd, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// scanEventBlocks folds a turn's tool_use / tool_result blocks into the detectors:
+// git-commit and test-run Bash calls are remembered by tool_use id, then resolved
+// into ev (keeping the newest) when their result arrives — commits on success,
+// tests as pass/fail from is_error.
+func scanEventBlocks(content json.RawMessage, ts time.Time, pendCommit, pendTest map[string]bool, ev *Event) {
+	if len(content) == 0 || content[0] != '[' {
+		return
+	}
+	var blocks []struct {
+		Type      string `json:"type"`
+		Name      string `json:"name"`
+		ID        string `json:"id"`
+		ToolUseID string `json:"tool_use_id"`
+		IsError   bool   `json:"is_error"`
+		Input     struct {
+			Command string `json:"command"`
+		} `json:"input"`
+	}
+	if json.Unmarshal(content, &blocks) != nil {
+		return
+	}
+	set := func(kind, label string) {
+		if ts.After(ev.Time) {
+			*ev = Event{Kind: kind, Label: label, Time: ts}
+		}
+	}
+	for _, b := range blocks {
+		switch {
+		case b.Type == "tool_use" && b.Name == "Bash":
+			if strings.Contains(b.Input.Command, "git commit") {
+				pendCommit[b.ID] = true
+			}
+			if isTestCmd(b.Input.Command) {
+				pendTest[b.ID] = true
+			}
+		case b.Type == "tool_result":
+			if pendCommit[b.ToolUseID] {
+				delete(pendCommit, b.ToolUseID)
+				if !b.IsError {
+					set("commit", "committed")
+				}
+			}
+			if pendTest[b.ToolUseID] {
+				delete(pendTest, b.ToolUseID)
+				if b.IsError {
+					set("test_fail", "tests fail")
+				} else {
+					set("test_pass", "tests pass")
+				}
+			}
+		}
+	}
+}
+
 // countLines returns the line count of s (0 for empty).
 func countLines(s string) int {
 	if s == "" {
@@ -166,6 +240,7 @@ type Reader struct {
 	latest     Stats
 	perSession map[string]SessionUsage
 	diffToday  DiffToday
+	lastEvent  Event
 }
 
 // NewReader reads transcripts from dir (empty → ~/.claude/projects). budgetTokens
@@ -203,6 +278,13 @@ func (r *Reader) DiffToday() DiffToday {
 	return r.diffToday
 }
 
+// LastEvent returns the most recent notable event (commit / test pass or fail).
+func (r *Reader) LastEvent() Event {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.lastEvent
+}
+
 // Run refreshes now and then every interval until ctx is cancelled.
 func (r *Reader) Run(ctx context.Context, interval time.Duration) {
 	_ = r.Refresh(time.Now())
@@ -226,7 +308,8 @@ type event struct {
 // Refresh rescans the transcripts and recomputes Stats as of now.
 func (r *Reader) Refresh(now time.Time) error {
 	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	events, per, diff, err := r.collect(now.Add(-historyDays*24*time.Hour), dayStart)
+	eventCut := now.Add(-5 * time.Minute)
+	events, per, diff, ev, err := r.collect(now.Add(-historyDays*24*time.Hour), dayStart, eventCut)
 	if err != nil {
 		return err
 	}
@@ -274,6 +357,7 @@ func (r *Reader) Refresh(now time.Time) error {
 	r.latest = Stats{Tokens: current, Budget: budget, Fraction: frac, EtaMins: etaMins}
 	r.perSession = per
 	r.diffToday = diff
+	r.lastEvent = ev
 	r.mu.Unlock()
 	return nil
 }
@@ -301,11 +385,12 @@ func peak5h(events []event) int64 {
 // session id (the file's basename). Files not modified within the window can't
 // hold recent events, so we skip them by mtime — the only thing that keeps a
 // full rescan cheap. Both outputs come from one pass over each file.
-func (r *Reader) collect(since, dayStart time.Time) ([]event, map[string]SessionUsage, DiffToday, error) {
+func (r *Reader) collect(since, dayStart, eventCut time.Time) ([]event, map[string]SessionUsage, DiffToday, Event, error) {
 	var events []event
 	per := make(map[string]SessionUsage)
 	diff := DiffToday{}
 	files := map[string]bool{} // distinct files touched today, across all transcripts
+	ev := &Event{}             // most recent notable event (commit / test) in the window
 	// Sub-agents run in their own agent-*.jsonl transcripts, each tagged with the
 	// parent conversation's sessionId. Roll them onto the parent: count them, and
 	// fold their token + dollar spend into the conversation's totals. This is
@@ -325,7 +410,7 @@ func (r *Reader) collect(since, dayStart time.Time) ([]event, map[string]Session
 			return nil // untouched in the window → no recent events
 		}
 		var su SessionUsage
-		events, su = scanFile(events, path, since, dayStart, &diff, files)
+		events, su = scanFile(events, path, since, dayStart, eventCut, &diff, files, ev)
 		base := strings.TrimSuffix(filepath.Base(path), ".jsonl")
 		if strings.HasPrefix(base, "agent-") {
 			if parent := parentSessionID(path); parent != "" {
@@ -349,9 +434,9 @@ func (r *Reader) collect(since, dayStart time.Time) ([]event, map[string]Session
 	}
 	diff.Files = len(files)
 	if os.IsNotExist(err) {
-		return events, per, diff, nil // no transcripts yet → zero usage, not an error
+		return events, per, diff, *ev, nil // no transcripts yet → zero usage, not an error
 	}
-	return events, per, diff, err
+	return events, per, diff, *ev, err
 }
 
 // parentSessionID reads a sub-agent transcript's parent conversation id from the
@@ -423,7 +508,7 @@ func (l lineUsage) costUSD() float64 {
 // scanFile reads one transcript once and returns (a) the in-window quota events
 // appended to events — identical to the old behaviour — and (b) the whole file's
 // per-conversation SessionUsage.
-func scanFile(events []event, path string, since, dayStart time.Time, diff *DiffToday, files map[string]bool) ([]event, SessionUsage) {
+func scanFile(events []event, path string, since, dayStart, eventCut time.Time, diff *DiffToday, files map[string]bool, ev *Event) ([]event, SessionUsage) {
 	f, err := os.Open(path)
 	if err != nil {
 		return events, SessionUsage{}
@@ -431,7 +516,8 @@ func scanFile(events []event, path string, since, dayStart time.Time, diff *Diff
 	defer f.Close()
 
 	var su SessionUsage
-	var cacheReadSum, inputAllSum int64 // for the cache-saver percentage
+	var cacheReadSum, inputAllSum int64                          // for the cache-saver percentage
+	pendCommit, pendTest := map[string]bool{}, map[string]bool{} // commit/test detectors
 	// Transcript lines can be very large (images, long tool output), so read with
 	// an unbounded ReadBytes rather than a fixed-buffer Scanner.
 	br := bufio.NewReader(f)
@@ -462,6 +548,11 @@ func scanFile(events []event, path string, since, dayStart time.Time, diff *Diff
 					if l.Type == "assistant" {
 						addEdits(l.Message.Content, diff, files) // today's edit volume
 					}
+				}
+				// Commit/test detectors: only very recent turns (eventCut), across
+				// both the tool_use (assistant) and its tool_result (user) turns.
+				if !l.Timestamp.IsZero() && !l.Timestamp.Before(eventCut) {
+					scanEventBlocks(l.Message.Content, l.Timestamp, pendCommit, pendTest, ev)
 				}
 				u := l.Message.Usage
 				cacheReadSum += u.CacheRead

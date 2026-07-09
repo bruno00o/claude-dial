@@ -234,6 +234,14 @@ func (d *Daemon) broadcast() {
 	today, budgetPct := d.todaySpend()
 	st := d.usage.Latest()
 	diff := d.usage.DiffToday()
+	// A notable event (commit / test) flashes on the device — but only while it's
+	// fresh, so a daemon restart never re-flashes an old one; the device dedups by
+	// EventEpoch so it fires exactly once.
+	ev := d.usage.LastEvent()
+	evKind, evLabel, evEpoch := "", "", int64(0)
+	if ev.Kind != "" && time.Since(ev.Time) < 3*time.Minute {
+		evKind, evLabel, evEpoch = ev.Kind, ev.Label, ev.Time.Unix()
+	}
 	d.dev.Update(protocol.Snapshot{
 		Sessions:    d.enrichedSessions(),
 		UsagePct:    st.Pct(),
@@ -243,6 +251,9 @@ func (d *Daemon) broadcast() {
 		DiffAdded:   diff.Added,
 		DiffRemoved: diff.Removed,
 		DiffFiles:   diff.Files,
+		Event:       evKind,
+		EventLabel:  evLabel,
+		EventEpoch:  evEpoch,
 	})
 }
 

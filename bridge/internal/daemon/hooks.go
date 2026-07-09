@@ -213,6 +213,11 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	u := d.usage.Latest()
 	todayCost, budgetPct := d.todaySpend()
 	diff := d.usage.DiffToday()
+	ev := d.usage.LastEvent()
+	evAge := -1
+	if !ev.Time.IsZero() {
+		evAge = int(time.Since(ev.Time).Seconds())
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"connected": d.dev.Connected(),
@@ -227,6 +232,9 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"diff_added":   diff.Added,
 			"diff_removed": diff.Removed,
 			"diff_files":   diff.Files,
+			"event":        ev.Kind,
+			"event_label":  ev.Label,
+			"event_age_s":  evAge,
 		},
 		"firmware": map[string]any{
 			"running":                  running,

@@ -56,21 +56,22 @@ type Device struct {
 	otaCtrlU, otaDataU, otaStatU bluetooth.UUID
 	debug                        bool
 
-	mu            sync.Mutex
-	rxChar        bluetooth.DeviceCharacteristic
-	hasRX         bool
-	connected     bool
-	conn          bluetooth.Device // current connection, for forcing a reconnect
-	hasConn       bool
-	firmware      string // version the Dial announced on connect ("" until it does)
-	otaCapable    bool   // firmware advertised OTA support in its hello
-	otaCtrl       bluetooth.DeviceCharacteristic
-	otaData       bluetooth.DeviceCharacteristic
-	hasOTA        bool   // all OTA characteristics were discovered
-	otaAdvertised string // last "update available" version pushed to the Dial (dedup)
-	lastUsagePct  int    // last usage gauge value pushed (-1 = none yet, forces first send)
-	lastBudgetPct int    // last daily-budget % pushed (-1 = none yet)
-	last          map[string]protocol.SessionView
+	mu             sync.Mutex
+	rxChar         bluetooth.DeviceCharacteristic
+	hasRX          bool
+	connected      bool
+	conn           bluetooth.Device // current connection, for forcing a reconnect
+	hasConn        bool
+	firmware       string // version the Dial announced on connect ("" until it does)
+	otaCapable     bool   // firmware advertised OTA support in its hello
+	otaCtrl        bluetooth.DeviceCharacteristic
+	otaData        bluetooth.DeviceCharacteristic
+	hasOTA         bool   // all OTA characteristics were discovered
+	otaAdvertised  string // last "update available" version pushed to the Dial (dedup)
+	lastUsagePct   int    // last usage gauge value pushed (-1 = none yet, forces first send)
+	lastBudgetPct  int    // last daily-budget % pushed (-1 = none yet)
+	lastEventEpoch int64  // last event epoch flashed, so each event fires exactly once
+	last           map[string]protocol.SessionView
 
 	wmu       sync.Mutex             // serializes all characteristic writes to the device
 	pending   chan protocol.Snapshot // coalescing hand-off to the writer goroutine
@@ -271,6 +272,7 @@ func (d *Device) onNotify(buf []byte) {
 			d.last = map[string]protocol.SessionView{}
 			d.lastUsagePct = -1
 			d.lastBudgetPct = -1
+			d.lastEventEpoch = 0
 			d.mu.Unlock()
 			d.logf("dial firmware %s (ota=%v)", hello.Firmware, hello.OTA)
 		}
@@ -513,14 +515,16 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 
 	// Usage gauge: push only when the percentage the Dial shows changes.
 	d.mu.Lock()
-	usageChanged := snap.UsagePct != d.lastUsagePct || snap.BudgetPct != d.lastBudgetPct
+	usageChanged := snap.UsagePct != d.lastUsagePct || snap.BudgetPct != d.lastBudgetPct || snap.EventEpoch != d.lastEventEpoch
 	d.mu.Unlock()
 	if usageChanged {
 		if d.write(protocol.Outbound{Type: "usage", Pct: snap.UsagePct, TodayCost: snap.TodayCost, BudgetPct: snap.BudgetPct,
-			EtaMins: snap.EtaMins, DiffAdded: snap.DiffAdded, DiffRemoved: snap.DiffRemoved, DiffFiles: snap.DiffFiles}) {
+			EtaMins: snap.EtaMins, DiffAdded: snap.DiffAdded, DiffRemoved: snap.DiffRemoved, DiffFiles: snap.DiffFiles,
+			Event: snap.Event, EventLabel: snap.EventLabel, EventEpoch: snap.EventEpoch}) {
 			d.mu.Lock()
 			d.lastUsagePct = snap.UsagePct
 			d.lastBudgetPct = snap.BudgetPct
+			d.lastEventEpoch = snap.EventEpoch
 			d.mu.Unlock()
 		} else {
 			ok = false

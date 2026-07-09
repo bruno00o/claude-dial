@@ -74,6 +74,11 @@ type Snapshot struct {
 	DiffAdded   int `json:"diff_added,omitempty"`
 	DiffRemoved int `json:"diff_removed,omitempty"`
 	DiffFiles   int `json:"diff_files,omitempty"`
+	// Event is a one-shot glance-flash (commit / test pass·fail); EventEpoch is its
+	// unix time, so the device flashes each event exactly once.
+	Event      string `json:"event,omitempty"`
+	EventLabel string `json:"event_label,omitempty"`
+	EventEpoch int64  `json:"event_epoch,omitempty"`
 }
 
 // Outbound is a single host -> device message (an RX write on the firmware).
@@ -114,6 +119,9 @@ type Outbound struct {
 	DiffAdded   int     `json:"diff_added,omitempty"`
 	DiffRemoved int     `json:"diff_removed,omitempty"`
 	DiffFiles   int     `json:"diff_files,omitempty"`
+	Event       string  `json:"event,omitempty"`
+	EventLabel  string  `json:"event_label,omitempty"`
+	EventEpoch  int64   `json:"event_epoch,omitempty"`
 }
 
 // Decision is a device -> host message: the user's answer on the dial.
