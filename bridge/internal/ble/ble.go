@@ -503,6 +503,8 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 				Errored:       s.Errored,
 				ElapsedSecs:   s.ElapsedSecs,
 				CachePct:      s.CachePct,
+				Stuck:         s.Stuck,
+				ColorIdx:      s.ColorIdx,
 			}) {
 				d.mu.Lock()
 				d.last[s.SessionID] = s
@@ -520,7 +522,7 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 	if usageChanged {
 		if d.write(protocol.Outbound{Type: "usage", Pct: snap.UsagePct, TodayCost: snap.TodayCost, BudgetPct: snap.BudgetPct,
 			EtaMins: snap.EtaMins, DiffAdded: snap.DiffAdded, DiffRemoved: snap.DiffRemoved, DiffFiles: snap.DiffFiles,
-			Event: snap.Event, EventLabel: snap.EventLabel, EventEpoch: snap.EventEpoch}) {
+			Event: snap.Event, EventLabel: snap.EventLabel, EventEpoch: snap.EventEpoch, Activity: snap.Activity}) {
 			d.mu.Lock()
 			d.lastUsagePct = snap.UsagePct
 			d.lastBudgetPct = snap.BudgetPct
@@ -571,7 +573,7 @@ func hostName() string {
 // takeover. So a "working" session whose command changes on every tool call looks
 // no different on screen — and must not cost a (slow, congestion-prone) BLE write.
 func displayEqual(a, b protocol.SessionView) bool {
-	if a.Project != b.Project || a.State != b.State {
+	if a.Project != b.Project || a.State != b.State || a.Stuck != b.Stuck {
 		return false
 	}
 	if a.State == protocol.StatePermission {

@@ -4,7 +4,10 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"net/http"
 	"sort"
 	"strings"
 	"sync/atomic"
@@ -68,6 +71,11 @@ type Daemon struct {
 	// dailyBudget is an optional daily spend target (USD). >0 drives the budget
 	// gauge/alert; 0 disables it.
 	dailyBudget float64
+
+	// notifyURL, if set, receives a JSON POST whenever the fleet mood changes
+	// (idle / working / needs_you) — wire it to Home Assistant, a smart light, …
+	notifyURL string
+	lastMood  atomic.Value // string, the last mood POSTed (dedup)
 }
 
 // Config tunes the daemon.
@@ -116,6 +124,9 @@ type Config struct {
 	// DailyBudget is an optional daily spend target in USD. >0 shows a budget
 	// gauge and alerts when today's spend crosses it.
 	DailyBudget float64
+	// NotifyURL, if set, receives a JSON POST on every fleet-mood change — wire it
+	// to Home Assistant / a webhook / a smart light. Empty disables it.
+	NotifyURL string
 	// Debug logs every hook event received.
 	Debug bool
 }
@@ -149,6 +160,7 @@ func New(store *session.Store, dev Device, cfg Config) *Daemon {
 		bridgeVersion: cfg.BridgeVersion,
 		contextMax:    cfg.ContextMax,
 		dailyBudget:   cfg.DailyBudget,
+		notifyURL:     cfg.NotifyURL,
 	}
 	projAliases = loadAliases(cfg.AliasesPath) // project-name → display-name overrides
 	go d.dispatch()
@@ -188,7 +200,11 @@ func (d *Daemon) dispatch() {
 // transcripts by session id (the filename), so this is an exact join onto the
 // sessions we already track. Shared by broadcast() (to the device) and /status.
 func (d *Daemon) enrichedSessions() []protocol.SessionView {
-	sessions := prioritize(disambiguate(d.store.Snapshot()))
+	raw := d.store.Snapshot()
+	for i := range raw {
+		raw[i].ColorIdx = colorIdx(raw[i].Project) // hash the true project, before disambiguation
+	}
+	sessions := prioritize(disambiguate(raw))
 	per := d.usage.PerSession()
 	if len(per) == 0 {
 		return sessions
@@ -229,6 +245,62 @@ func (d *Daemon) todaySpend() (cost float64, pct int) {
 	return cost, pct
 }
 
+// colorIdx maps a project name to one of 12 palette slots (FNV-1a), so each repo
+// wears a stable colour dot on the roster and you recognise it at a glance.
+func colorIdx(s string) int {
+	if s == "" {
+		return 0
+	}
+	var h uint32 = 2166136261
+	for i := 0; i < len(s); i++ {
+		h ^= uint32(s[i])
+		h *= 16777619
+	}
+	return int(h % 12)
+}
+
+// maybeNotify POSTs the fleet mood (idle / working / needs_you) to notifyURL when
+// it changes, so an external target (Home Assistant, a smart light) can react.
+// Fire-and-forget with a short timeout so it never blocks the broadcast path.
+func (d *Daemon) maybeNotify(sessions []protocol.SessionView) {
+	if d.notifyURL == "" {
+		return
+	}
+	needs, working := 0, 0
+	for _, s := range sessions {
+		switch s.State {
+		case protocol.StatePermission, protocol.StateBlocked:
+			needs++
+		case protocol.StateWorking:
+			working++
+		}
+	}
+	mood := "idle"
+	if needs > 0 {
+		mood = "needs_you"
+	} else if working > 0 {
+		mood = "working"
+	}
+	if prev, _ := d.lastMood.Load().(string); prev == mood {
+		return
+	}
+	d.lastMood.Store(mood)
+	body, _ := json.Marshal(map[string]any{
+		"mood": mood, "needs_you": needs, "working": working, "sessions": len(sessions),
+	})
+	go func() {
+		req, err := http.NewRequest(http.MethodPost, d.notifyURL, bytes.NewReader(body))
+		if err != nil {
+			return
+		}
+		req.Header.Set("Content-Type", "application/json")
+		client := &http.Client{Timeout: 4 * time.Second}
+		if resp, err := client.Do(req); err == nil {
+			resp.Body.Close()
+		}
+	}()
+}
+
 // broadcast renders the current (enriched) store to the device.
 func (d *Daemon) broadcast() {
 	today, budgetPct := d.todaySpend()
@@ -242,8 +314,10 @@ func (d *Daemon) broadcast() {
 	if ev.Kind != "" && time.Since(ev.Time) < 3*time.Minute {
 		evKind, evLabel, evEpoch = ev.Kind, ev.Label, ev.Time.Unix()
 	}
+	sessions := d.enrichedSessions()
+	d.maybeNotify(sessions)
 	d.dev.Update(protocol.Snapshot{
-		Sessions:    d.enrichedSessions(),
+		Sessions:    sessions,
 		UsagePct:    st.Pct(),
 		TodayCost:   today,
 		BudgetPct:   budgetPct,
@@ -254,6 +328,7 @@ func (d *Daemon) broadcast() {
 		Event:       evKind,
 		EventLabel:  evLabel,
 		EventEpoch:  evEpoch,
+		Activity:    d.usage.Activity(),
 	})
 }
 

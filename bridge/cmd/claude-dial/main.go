@@ -95,6 +95,7 @@ func cmdServe(args []string) {
 	usageBudget := fs.Int64("usage-budget", 0, "token budget for the 5h usage gauge (0 = auto-calibrate to your heaviest recent 5h)")
 	contextMax := fs.Int64("context-max", 1_000_000, "model max context window in tokens — the rim shows a session's context as a fraction of this")
 	dailyBudget := fs.Float64("daily-budget", 0, "daily spend target in USD (0 = off); the Dial shows today's $ and warns when you cross it")
+	notifyURL := fs.String("notify-url", "", "POST fleet mood (idle/working/needs_you) here on change — wire to Home Assistant, a webhook, a smart light")
 	debug := fs.Bool("debug", false, "log every hook event received")
 	_ = fs.Parse(args)
 
@@ -116,7 +117,7 @@ func cmdServe(args []string) {
 		}
 	}
 
-	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), AliasesPath: aliasesPath(), BridgeVersion: version, UsageBudgetTokens: *usageBudget, ContextMax: *contextMax, DailyBudget: *dailyBudget, Debug: *debug})
+	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), AliasesPath: aliasesPath(), BridgeVersion: version, UsageBudgetTokens: *usageBudget, ContextMax: *contextMax, DailyBudget: *dailyBudget, NotifyURL: *notifyURL, Debug: *debug})
 
 	mux := http.NewServeMux()
 	hub.RegisterRoutes(mux)

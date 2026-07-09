@@ -241,6 +241,7 @@ type Reader struct {
 	perSession map[string]SessionUsage
 	diffToday  DiffToday
 	lastEvent  Event
+	activity   string // 24-char today heatmap, one char/hour ('0'..'9')
 }
 
 // NewReader reads transcripts from dir (empty → ~/.claude/projects). budgetTokens
@@ -283,6 +284,13 @@ func (r *Reader) LastEvent() Event {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.lastEvent
+}
+
+// Activity returns today's 24-hour token heatmap, one char per hour ('0'..'9').
+func (r *Reader) Activity() string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.activity
 }
 
 // Run refreshes now and then every interval until ctx is cancelled.
@@ -353,11 +361,39 @@ func (r *Reader) Refresh(now time.Time) error {
 		}
 	}
 
+	// Today activity heatmap: 24 hourly token buckets since local midnight, scaled
+	// to '0'..'9' by the busiest hour.
+	var buckets [24]int64
+	for _, e := range events {
+		if !e.t.Before(dayStart) {
+			buckets[e.t.In(now.Location()).Hour()] += e.tok
+		}
+	}
+	var maxb int64
+	for _, b := range buckets {
+		if b > maxb {
+			maxb = b
+		}
+	}
+	act := make([]byte, 24)
+	for i, b := range buckets {
+		if maxb == 0 || b == 0 {
+			act[i] = '0'
+			continue
+		}
+		v := int(9 * b / maxb)
+		if v < 1 {
+			v = 1
+		}
+		act[i] = byte('0' + v)
+	}
+
 	r.mu.Lock()
 	r.latest = Stats{Tokens: current, Budget: budget, Fraction: frac, EtaMins: etaMins}
 	r.perSession = per
 	r.diffToday = diff
 	r.lastEvent = ev
+	r.activity = string(act)
 	r.mu.Unlock()
 	return nil
 }

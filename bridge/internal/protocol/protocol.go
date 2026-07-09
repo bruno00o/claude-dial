@@ -57,6 +57,8 @@ type SessionView struct {
 	Errored       bool    `json:"errored,omitempty"`        // the conversation's most recent tool call failed
 	ElapsedSecs   int     `json:"elapsed_secs,omitempty"`   // seconds since this session first appeared
 	CachePct      int     `json:"cache_pct,omitempty"`      // % of input tokens served from cache (the cache saver)
+	Stuck         bool    `json:"stuck,omitempty"`          // working the same command too long (hung / loop)
+	ColorIdx      int     `json:"color_idx,omitempty"`      // per-project palette index, for a colour dot
 }
 
 // Snapshot is the full state pushed to a Device on every change.
@@ -79,6 +81,8 @@ type Snapshot struct {
 	Event      string `json:"event,omitempty"`
 	EventLabel string `json:"event_label,omitempty"`
 	EventEpoch int64  `json:"event_epoch,omitempty"`
+	// Activity is a 24-char today heatmap, one char per hour ('0'..'9' intensity).
+	Activity string `json:"activity,omitempty"`
 }
 
 // Outbound is a single host -> device message (an RX write on the firmware).
@@ -101,6 +105,8 @@ type Outbound struct {
 	Errored       bool    `json:"errored,omitempty"`
 	ElapsedSecs   int     `json:"elapsed_secs,omitempty"`
 	CachePct      int     `json:"cache_pct,omitempty"`
+	Stuck         bool    `json:"stuck,omitempty"`
+	ColorIdx      int     `json:"color_idx,omitempty"`
 
 	// control messages: {"type":"set_time","epoch":…,"tz_offset":…,"host":"…"},
 	// {"type":"ota_available","version":"0.6.0"} (empty version clears the prompt),
@@ -122,6 +128,7 @@ type Outbound struct {
 	Event       string  `json:"event,omitempty"`
 	EventLabel  string  `json:"event_label,omitempty"`
 	EventEpoch  int64   `json:"event_epoch,omitempty"`
+	Activity    string  `json:"activity,omitempty"`
 }
 
 // Decision is a device -> host message: the user's answer on the dial.

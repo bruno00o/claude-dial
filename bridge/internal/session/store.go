@@ -11,13 +11,14 @@ import (
 
 // Session is one Claude Code session.
 type Session struct {
-	ID      string
-	Project string
-	State   string
-	Tool    string
-	Command string
-	Updated time.Time
-	Started time.Time // first seen — for the "elapsed" readout
+	ID       string
+	Project  string
+	State    string
+	Tool     string
+	Command  string
+	Updated  time.Time
+	Started  time.Time // first seen — for the "elapsed" readout
+	CmdSince time.Time // when the current tool/command started — for the "stuck" clock
 }
 
 // Store is a concurrency-safe set of sessions, kept in insertion order so the
@@ -54,6 +55,9 @@ func (s *Store) Upsert(id, project, state, tool, command string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	ss := s.ensure(id, project)
+	if ss.Tool != tool || ss.Command != command {
+		ss.CmdSince = s.now() // command changed → restart the "stuck" clock
+	}
 	ss.State = state
 	ss.Tool = tool
 	ss.Command = command
@@ -184,6 +188,10 @@ func (s *Store) Snapshot() []protocol.SessionView {
 		if !ss.Started.IsZero() {
 			elapsed = int(s.now().Sub(ss.Started) / time.Second)
 		}
+		// Stuck: working on the same command for a long stretch (a hung tool or a
+		// loop). Advisory only, so a generous threshold avoids flagging long builds.
+		stuck := ss.State == protocol.StateWorking && ss.Command != "" &&
+			!ss.CmdSince.IsZero() && s.now().Sub(ss.CmdSince) > 4*time.Minute
 		out = append(out, protocol.SessionView{
 			SessionID:   ss.ID,
 			Project:     ss.Project,
@@ -191,6 +199,7 @@ func (s *Store) Snapshot() []protocol.SessionView {
 			ToolName:    ss.Tool,
 			Command:     ss.Command,
 			ElapsedSecs: elapsed,
+			Stuck:       stuck,
 		})
 	}
 	return out
