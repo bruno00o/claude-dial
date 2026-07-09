@@ -235,6 +235,8 @@ static char  dialId[20] = "";
 static int   usagePct = 0;
 static float todayCost = 0;   // today's spend (USD), from the usage message
 static int   budgetPct = 0;   // today's spend as % of the daily budget (0 = no budget)
+static int   etaMins   = 0;   // burn forecast: minutes until the 5h limit (0 = n/a)
+static int   diffAdded = 0, diffRemoved = 0, diffFiles = 0;  // today's edit volume
 
 // Display brightness (0-255), adjustable from the menu, persisted in NVS.
 static uint8_t   brightness = 180;
@@ -511,8 +513,12 @@ static void handleRxMessage(const char* data, uint16_t len) {
     usagePct = doc["pct"] | 0;
     if (usagePct < 0) usagePct = 0;
     if (usagePct > 100) usagePct = 100;
-    todayCost = doc["today_cost"] | 0.0f;
-    budgetPct = doc["budget_pct"] | 0;
+    todayCost   = doc["today_cost"]   | 0.0f;
+    budgetPct   = doc["budget_pct"]   | 0;
+    etaMins     = doc["eta_mins"]     | 0;
+    diffAdded   = doc["diff_added"]   | 0;
+    diffRemoved = doc["diff_removed"] | 0;
+    diffFiles   = doc["diff_files"]   | 0;
     needsRedraw = true;
     return;
   }
@@ -943,14 +949,20 @@ static void drawSessionList() {
     canvas.drawString(rimLbl, CX, 30);
   }
 
-  // header — masthead like the web roster: count (amber) + "session(s)" (dim) on
-  // the left, the clock (dim) on the right, with a hairline rule beneath. "claude ›"
-  // is dropped: the round chord can't hold branding + clock on one line.
+  // Fleet weather: the session count wears the aggregate mood — red when any
+  // session needs you (storm), amber when work is in flight, grey when all calm.
+  bool anyWorking = false;
+  for (int i = 0; i < n; i++)
+    if (strcmp(sessions[active[i]].state, "working") == 0) { anyWorking = true; break; }
+  uint32_t moodCol = waits > 0 ? COL_RED : (anyWorking ? COL_AMBER : COL_GRAY);
+
+  // header — masthead like the web roster: count (mood-coloured) + "session(s)"
+  // (dim) on the left, the clock (dim) on the right, with a hairline rule beneath.
   useS();
   const int hy = 50, hcw = canvas.textWidth("0");
   char cnt[8]; snprintf(cnt, sizeof(cnt), "%d", n);
   canvas.setTextDatum(middle_left);
-  canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.setTextColor(moodCol, COL_BG);
   canvas.drawString(cnt, CX - 88, hy);
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString(n == 1 ? " session" : " sessions", CX - 88 + (int)strlen(cnt) * hcw, hy);
@@ -1161,31 +1173,38 @@ static void drawGlobalStats() {
   drawUsageArcBold(usagePct / 100.0f, usageColor(), COL_ARC_OFF);
   if (usagePct > 0) {
     useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
-    char rl[12]; snprintf(rl, sizeof(rl), "5h %d%%", usagePct);
+    char rl[20];   // burn forecast appended: "5h 21% ~7h"
+    if (etaMins >= 60)     snprintf(rl, sizeof(rl), "5h %d%% ~%dh", usagePct, etaMins / 60);
+    else if (etaMins > 0)  snprintf(rl, sizeof(rl), "5h %d%% ~%dm", usagePct, etaMins);
+    else                   snprintf(rl, sizeof(rl), "5h %d%%", usagePct);
     canvas.drawString(rl, CX, 30);
   }
 
-  int n = 0; long tokTotal = 0; float costTotal = 0;
+  int n = 0; long tokTotal = 0;
   for (int i = 0; i < MAX_SESSIONS; i++) {
     if (!sessions[i].active) continue;
     n++;
-    tokTotal  += sessions[i].total_tokens;
-    costTotal += sessions[i].cost_usd;
+    tokTotal += sessions[i].total_tokens;
   }
 
   useM(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_AMBER, COL_BG);
   canvas.drawString("global", CX, 56);
   canvas.drawFastHLine(CX - 62, 74, 124, COL_RING);
 
-  char sb[12], tb[16], db[16], yb[16];
+  char sb[12], tb[16], yb[16];
   snprintf(sb, sizeof(sb), "%d", n);
-  if (tokTotal  > 0) fmtTokens(tokTotal, tb, sizeof(tb));            else strlcpy(tb, "-", sizeof(tb));
-  if (costTotal > 0) snprintf(db, sizeof(db), "$%.2f", costTotal);  else strlcpy(db, "-", sizeof(db));
-  if (todayCost > 0) snprintf(yb, sizeof(yb), "$%.2f", todayCost);  else strlcpy(yb, "-", sizeof(yb));
+  if (tokTotal  > 0) fmtTokens(tokTotal, tb, sizeof(tb));          else strlcpy(tb, "-", sizeof(tb));
+  if (todayCost > 0) snprintf(yb, sizeof(yb), "$%.2f", todayCost); else strlcpy(yb, "-", sizeof(yb));
   detailStat(96,  "sessions", sb, COL_INK);
   detailStat(116, "tokens",   tb, COL_INK);
-  detailStat(136, "cost",     db, COL_AMBER_HOT);
-  detailStat(156, "today",    yb, budgetPct >= 100 ? COL_RED : COL_AMBER);
+  detailStat(136, "today",    yb, budgetPct >= 100 ? COL_RED : COL_AMBER);
+
+  // diff of the day — today's edit volume (from Edit/Write tool inputs)
+  if (diffAdded > 0 || diffRemoved > 0) {
+    char dl[28]; snprintf(dl, sizeof(dl), "+%d -%d  %df", diffAdded, diffRemoved, diffFiles);
+    useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_AMBER, COL_BG);
+    canvas.drawString(dl, CX, 158);
+  }
 
   // daily-budget bar — only when a budget is configured (budgetPct > 0)
   int hintY = 190;
