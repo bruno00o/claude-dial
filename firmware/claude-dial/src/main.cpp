@@ -248,6 +248,7 @@ static int   budgetPct = 0;   // today's spend as % of the daily budget (0 = no 
 static int   etaMins   = 0;   // burn forecast: minutes until the 5h limit (0 = n/a)
 static int   diffAdded = 0, diffRemoved = 0, diffFiles = 0;  // today's edit volume
 static char  activity[26] = {0};     // 24h today heatmap, one char/hour ('0'..'9')
+static char  modelSpend[40] = {0};   // today's $ by model family, e.g. "opus $155"
 static uint32_t flashUntil = 0;      // event glance-flash active until this millis()
 static long     lastFlashEpoch = 0;  // dedup: flash each event epoch exactly once
 static char     flashKind[16] = {0};
@@ -525,6 +526,7 @@ static void handleRxMessage(const char* data, uint16_t len) {
     diffRemoved = doc["diff_removed"] | 0;
     diffFiles   = doc["diff_files"]   | 0;
     strlcpy(activity, doc["activity"] | "", sizeof(activity));
+    strlcpy(modelSpend, doc["model_spend"] | "", sizeof(modelSpend));
     // one-shot glance-flash for a commit / test result — dedup by epoch
     long evEpoch = doc["event_epoch"] | 0;
     const char* evKind = doc["event"] | "";
@@ -1238,20 +1240,25 @@ static void drawGlobalStats() {
   if (todayCost > 0) snprintf(yb, sizeof(yb), "$%.2f", todayCost); else strlcpy(yb, "-", sizeof(yb));
   // today $ shows a "!" and reddens once over the daily budget (bar dropped for the strip)
   char yf[20]; snprintf(yf, sizeof(yf), "%s%s", yb, budgetPct >= 100 ? " !" : "");
-  detailStat(94,  "sessions", sb, COL_INK);
-  detailStat(112, "tokens",   tb, COL_INK);
-  detailStat(130, "today",    yf, budgetPct >= 100 ? COL_RED : COL_AMBER);
+  detailStat(92,  "sessions", sb, COL_INK);
+  detailStat(110, "today",    yf, budgetPct >= 100 ? COL_RED : COL_AMBER);
+  (void)tb;  // tokens dropped from the today card in favour of the model breakdown
 
+  // today's spend by model family — "opus $155 · sonnet $80"
+  if (modelSpend[0]) {
+    useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString(modelSpend, CX, 128);
+  }
   // diff of the day — today's edit volume (from Edit/Write tool inputs)
   if (diffAdded > 0 || diffRemoved > 0) {
     char dl[28]; snprintf(dl, sizeof(dl), "+%d -%d  %df", diffAdded, diffRemoved, diffFiles);
     useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_AMBER, COL_BG);
-    canvas.drawString(dl, CX, 150);
+    canvas.drawString(dl, CX, 146);
   }
 
   // 24h activity strip — today's work rhythm (the "today card" signature)
   if (activity[0]) {
-    const int baseY = 178, maxH = 16, bx0 = CX - 72;
+    const int baseY = 174, maxH = 16, bx0 = CX - 72;
     for (int h = 0; h < 24; h++) {
       int v = activity[h] - '0'; if (v < 0) v = 0; if (v > 9) v = 9;
       int bh = v * maxH / 9;
@@ -1261,7 +1268,7 @@ static void drawGlobalStats() {
   }
 
   useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("press: recent", CX, 196);
+  canvas.drawString("press: recent", CX, 194);
   canvas.pushSprite(0, 0);
 }
 

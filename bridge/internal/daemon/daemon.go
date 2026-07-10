@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -328,6 +329,52 @@ func (d *Daemon) recentConversations(limit int) []protocol.RecentConv {
 	return list
 }
 
+// modelFamily buckets a model id into a short family name for the spend breakdown.
+func modelFamily(m string) string {
+	switch {
+	case strings.Contains(m, "opus"):
+		return "opus"
+	case strings.Contains(m, "sonnet"):
+		return "sonnet"
+	case strings.Contains(m, "haiku"):
+		return "haiku"
+	case strings.Contains(m, "fable"), strings.Contains(m, "mythos"):
+		return "fable"
+	case m == "":
+		return "?"
+	default:
+		return m
+	}
+}
+
+// modelSpend formats today's spend split by model family, biggest first, top 3 —
+// e.g. "opus $200 · sonnet $80". Empty when nothing spent today.
+func (d *Daemon) modelSpend() string {
+	by := map[string]float64{}
+	for _, u := range d.usage.PerSession() {
+		if u.TodayCost > 0 {
+			by[modelFamily(u.Model)] += u.TodayCost
+		}
+	}
+	type ms struct {
+		m string
+		c float64
+	}
+	list := make([]ms, 0, len(by))
+	for m, c := range by {
+		list = append(list, ms{m, c})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].c > list[j].c })
+	parts := make([]string, 0, 3)
+	for i, x := range list {
+		if i >= 3 {
+			break
+		}
+		parts = append(parts, fmt.Sprintf("%s $%.0f", x.m, x.c))
+	}
+	return strings.Join(parts, " · ")
+}
+
 // broadcast renders the current (enriched) store to the device.
 func (d *Daemon) broadcast() {
 	today, budgetPct := d.todaySpend()
@@ -357,6 +404,7 @@ func (d *Daemon) broadcast() {
 		EventLabel:  evLabel,
 		EventEpoch:  evEpoch,
 		Activity:    d.usage.Activity(),
+		ModelSpend:  d.modelSpend(),
 	})
 }
 

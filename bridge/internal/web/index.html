@@ -229,6 +229,7 @@
       const ts=[];
       if(snap.today_cost)ts.push(`<span class="${snap.budget_pct>=100?'over':''}">today $${(+snap.today_cost).toFixed(2)}${snap.budget_pct>=100?' !':''}</span>`);
       if(snap.diff_added||snap.diff_removed)ts.push(`+${snap.diff_added||0} -${snap.diff_removed||0} ${snap.diff_files||0}f`);
+      if(snap.model_spend)ts.push(esc(snap.model_spend));
       const today=(ts.length||bars)?`<div class="todaycard" title="recent history">${ts.length?`<div class="today">${ts.join(' · ')}</div>`:''}${bars}</div>`:`<div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div>`;
       inner=rim(snap.usage_pct)+`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n" style="color:${mood}">${list.length}</span> session${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div>${today}</div>`;
     } else {

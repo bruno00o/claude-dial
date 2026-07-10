@@ -524,7 +524,8 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 	if usageChanged {
 		if d.write(protocol.Outbound{Type: "usage", Pct: snap.UsagePct, TodayCost: snap.TodayCost, BudgetPct: snap.BudgetPct,
 			EtaMins: snap.EtaMins, DiffAdded: snap.DiffAdded, DiffRemoved: snap.DiffRemoved, DiffFiles: snap.DiffFiles,
-			Event: snap.Event, EventLabel: snap.EventLabel, EventEpoch: snap.EventEpoch, Activity: snap.Activity}) {
+			Event: snap.Event, EventLabel: snap.EventLabel, EventEpoch: snap.EventEpoch, Activity: snap.Activity,
+			ModelSpend: snap.ModelSpend}) {
 			d.mu.Lock()
 			d.lastUsagePct = snap.UsagePct
 			d.lastBudgetPct = snap.BudgetPct

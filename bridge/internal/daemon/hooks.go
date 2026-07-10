@@ -237,6 +237,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 			"event_label":  ev.Label,
 			"event_age_s":  evAge,
 			"activity":     d.usage.Activity(),
+			"model_spend":  d.modelSpend(),
 		},
 		"firmware": map[string]any{
 			"running":                  running,

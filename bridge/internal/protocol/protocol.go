@@ -98,6 +98,8 @@ type Snapshot struct {
 	EventEpoch int64  `json:"event_epoch,omitempty"`
 	// Activity is a 24-char today heatmap, one char per hour ('0'..'9' intensity).
 	Activity string `json:"activity,omitempty"`
+	// ModelSpend is today's spend split by model family, e.g. "opus $200 · sonnet $80".
+	ModelSpend string `json:"model_spend,omitempty"`
 }
 
 // Outbound is a single host -> device message (an RX write on the firmware).
@@ -144,6 +146,7 @@ type Outbound struct {
 	EventLabel  string  `json:"event_label,omitempty"`
 	EventEpoch  int64   `json:"event_epoch,omitempty"`
 	Activity    string  `json:"activity,omitempty"`
+	ModelSpend  string  `json:"model_spend,omitempty"`
 }
 
 // Decision is a device -> host message: the user's answer on the dial.
