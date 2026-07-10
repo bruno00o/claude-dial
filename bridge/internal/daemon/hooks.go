@@ -222,6 +222,7 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"connected": d.dev.Connected(),
 		"sessions":  d.enrichedSessions(),
+		"recent":    d.recentConversations(10),
 		"usage": map[string]any{
 			"pct":          u.Pct(),
 			"tokens":       u.Tokens,

@@ -301,6 +301,33 @@ func (d *Daemon) maybeNotify(sessions []protocol.SessionView) {
 	}()
 }
 
+// recentConversations builds the history list from the transcripts the usage
+// reader already scans: every recent conversation with a real cwd, newest first,
+// capped. Survives restarts and includes ones that ended before the device connected.
+func (d *Daemon) recentConversations(limit int) []protocol.RecentConv {
+	per := d.usage.PerSession()
+	list := make([]protocol.RecentConv, 0, len(per))
+	for sid, u := range per {
+		if u.Cwd == "" {
+			continue // journals / non-conversation files have no cwd
+		}
+		list = append(list, protocol.RecentConv{
+			SessionID: sid,
+			Project:   projectName(u.Cwd),
+			Total:     u.Total,
+			CostUSD:   u.Cost,
+			Model:     strings.TrimPrefix(u.Model, "claude-"),
+			Errored:   u.LastError,
+			AgeSecs:   int(time.Since(u.LastActive).Seconds()),
+		})
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].AgeSecs < list[j].AgeSecs })
+	if len(list) > limit {
+		list = list[:limit]
+	}
+	return list
+}
+
 // broadcast renders the current (enriched) store to the device.
 func (d *Daemon) broadcast() {
 	today, budgetPct := d.todaySpend()
@@ -318,6 +345,7 @@ func (d *Daemon) broadcast() {
 	d.maybeNotify(sessions)
 	d.dev.Update(protocol.Snapshot{
 		Sessions:    sessions,
+		Recent:      d.recentConversations(10),
 		UsagePct:    st.Pct(),
 		TodayCost:   today,
 		BudgetPct:   budgetPct,

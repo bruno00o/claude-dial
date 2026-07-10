@@ -61,9 +61,24 @@ type SessionView struct {
 	ColorIdx      int     `json:"color_idx,omitempty"`      // per-project palette index, for a colour dot
 }
 
+// RecentConv is one recently-active conversation for the history screen. Built
+// from the transcripts the daemon already scans, so it survives restarts and
+// includes conversations that ended before the device connected.
+type RecentConv struct {
+	SessionID string  `json:"session_id"`
+	Project   string  `json:"project"`
+	Total     int64   `json:"total,omitempty"`
+	CostUSD   float64 `json:"cost_usd,omitempty"`
+	Model     string  `json:"model,omitempty"`
+	Errored   bool    `json:"errored,omitempty"`
+	AgeSecs   int     `json:"age_secs,omitempty"`
+}
+
 // Snapshot is the full state pushed to a Device on every change.
 type Snapshot struct {
 	Sessions []SessionView `json:"sessions"`
+	// Recent is the recent-history list (newest first), for the history screen.
+	Recent []RecentConv `json:"recent,omitempty"`
 	// UsagePct is how full the 5h usage window is (0..100), for the rim gauge.
 	UsagePct int `json:"usage_pct,omitempty"`
 	// TodayCost is total spend since local midnight; BudgetPct is that as a % of

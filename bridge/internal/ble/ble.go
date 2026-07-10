@@ -71,6 +71,7 @@ type Device struct {
 	lastUsagePct   int    // last usage gauge value pushed (-1 = none yet, forces first send)
 	lastBudgetPct  int    // last daily-budget % pushed (-1 = none yet)
 	lastEventEpoch int64  // last event epoch flashed, so each event fires exactly once
+	lastRecentHash string // fingerprint of the recent-history set last sent
 	last           map[string]protocol.SessionView
 
 	wmu       sync.Mutex             // serializes all characteristic writes to the device
@@ -273,6 +274,7 @@ func (d *Device) onNotify(buf []byte) {
 			d.lastUsagePct = -1
 			d.lastBudgetPct = -1
 			d.lastEventEpoch = 0
+			d.lastRecentHash = ""
 			d.mu.Unlock()
 			d.logf("dial firmware %s (ota=%v)", hello.Firmware, hello.OTA)
 		}
@@ -532,7 +534,40 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 			ok = false
 		}
 	}
+
+	// Recent history: resend only when the SET of conversations changes (a hash of
+	// their ids), as a reset followed by one message each — cheap and non-chatty,
+	// so ages ticking every second don't reflood the device.
+	hash := recentHash(snap.Recent)
+	d.mu.Lock()
+	recentChanged := hash != d.lastRecentHash
+	d.mu.Unlock()
+	if recentChanged {
+		sent := d.write(protocol.Outbound{Type: "recent_reset"})
+		for _, r := range snap.Recent {
+			sent = d.write(protocol.Outbound{Type: "recent", Project: r.Project,
+				TotalTokens: r.Total, CostUSD: r.CostUSD, Model: r.Model, Errored: r.Errored}) && sent
+		}
+		if sent {
+			d.mu.Lock()
+			d.lastRecentHash = hash
+			d.mu.Unlock()
+		} else {
+			ok = false
+		}
+	}
 	return ok
+}
+
+// recentHash fingerprints the recent set by conversation id, so the history list
+// is resent to the device only when membership changes, not on every age tick.
+func recentHash(recent []protocol.RecentConv) string {
+	var b strings.Builder
+	for _, r := range recent {
+		b.WriteString(r.SessionID)
+		b.WriteByte('|')
+	}
+	return b.String()
 }
 
 // Connected reports whether a Dial is currently connected. Implements

@@ -182,14 +182,16 @@ func (s Stats) Pct() int { return int(s.Fraction*100 + 0.5) }
 
 // SessionUsage is per-conversation usage derived from a single transcript file.
 type SessionUsage struct {
-	Total     int64   // cumulative "work" tokens (input+output+cache_creation) over all turns
-	Context   int64   // tokens resident in the context window at the last main-thread assistant turn
-	SubAgents int     // sub-agents spawned (count of this conversation's agent-*.jsonl transcripts)
-	Cost      float64 // cumulative USD cost for this conversation (ccusage-style, all turns)
-	Model     string  // the last main-thread assistant model (e.g. "claude-sonnet-4-6")
-	LastError bool    // the most recent tool result in the transcript was an error
-	CachePct  int     // % of input tokens served from cache (the cache saver)
-	TodayCost float64 // USD spent by this conversation since local midnight
+	Total      int64     // cumulative "work" tokens (input+output+cache_creation) over all turns
+	Context    int64     // tokens resident in the context window at the last main-thread assistant turn
+	SubAgents  int       // sub-agents spawned (count of this conversation's agent-*.jsonl transcripts)
+	Cost       float64   // cumulative USD cost for this conversation (ccusage-style, all turns)
+	Model      string    // the last main-thread assistant model (e.g. "claude-sonnet-4-6")
+	LastError  bool      // the most recent tool result in the transcript was an error
+	CachePct   int       // % of input tokens served from cache (the cache saver)
+	TodayCost  float64   // USD spent by this conversation since local midnight
+	Cwd        string    // working dir (from the transcript) — for resolving the project
+	LastActive time.Time // most recent turn timestamp — for recency sorting
 }
 
 // lastToolResultError scans a turn's content for tool_result blocks and reports
@@ -501,6 +503,7 @@ type lineUsage struct {
 	Timestamp   time.Time `json:"timestamp"`
 	Type        string    `json:"type"`        // "assistant", "user", …
 	IsSidechain bool      `json:"isSidechain"` // true for Task sub-agent turns
+	Cwd         string    `json:"cwd"`         // working dir — for resolving the project name
 	Message     struct {
 		Model string `json:"model"` // e.g. "claude-sonnet-4-6" — for cost pricing
 		Usage struct {
@@ -562,6 +565,12 @@ func scanFile(events []event, path string, since, dayStart, eventCut time.Time, 
 		if len(raw) > 0 {
 			var l lineUsage
 			if json.Unmarshal(raw, &l) == nil {
+				if l.Cwd != "" {
+					su.Cwd = l.Cwd // last non-empty wins — for the recent-history project name
+				}
+				if l.Timestamp.After(su.LastActive) {
+					su.LastActive = l.Timestamp
+				}
 				// Error sniffer: the most recent tool result's error state (tool
 				// results live in user turns). The last one seen wins, so a later
 				// success clears it — the row reflects "the last tool call failed".
