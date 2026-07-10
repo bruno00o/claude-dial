@@ -94,6 +94,13 @@
   .flash{position:absolute; inset:0; z-index:20; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:#0a0805; border-radius:50%;}
   .flash .disc{width:76px; height:76px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:40px; color:#0a0805;}
   .flash .cap{font-size:18px; font-weight:500;}
+  /* detail drill-in */
+  .d-title{font-size:21px; color:var(--amber); text-align:center; text-shadow:0 0 8px rgba(255,166,43,.5); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .d-sub{font-size:12px; text-align:center; margin:3px 0 7px;}
+  .d-rule{height:1px; background:linear-gradient(90deg,transparent,#3a3327,transparent); margin:0 18px 6px;}
+  .d-row{display:flex; justify-content:space-between; font-size:14px; padding:2px 8px; color:var(--dim);}
+  .d-row b{font-weight:400; color:var(--ink); font-variant-numeric:tabular-nums;}
+  .d-ft{font-size:11px; color:var(--dim); text-align:center; margin-top:9px;}
   @media (prefers-reduced-motion: reduce){ *{animation:none !important;} }
 </style>
 </head>
@@ -111,7 +118,7 @@
   const PROJECT_COLORS=["#FFB000","#35D07F","#4FA3FF","#FF6FB5","#C77DFF","#00C2C7","#FF8A3D","#9BE564","#FFD23F","#7AA2FF","#FF5B6E","#B0B7C3"];
 
   let snap={sessions:[]}, caret=0, opt=0, rot=0, lastTop=null, connected=false;
-  let flashState=null, lastFlashEpoch=0;   // event glance-flash (commit / test)
+  let flashState=null, lastFlashEpoch=0, detailSid=null;   // event flash + drill-in
 
   const pending=()=>snap.sessions.filter(s=>s.state==="permission_request");
   const roster=()=>snap.sessions.filter(s=>s.state!=="permission_request");
@@ -123,11 +130,32 @@
   const rimColor=p=>p>=85?"var(--red)":p>=70?"var(--amber-hot)":"var(--amber)";
   // rim(pct): the 5h usage gauge as an arc from 12 o'clock, matching the firmware's
   // amber→hot→red thresholds; labelled "5h" so it never reads as a context bar.
-  const rim=pct=>{ const p=Math.max(0,Math.min(100,Math.round(pct||0))), R=150, C=2*Math.PI*R, off=C*(1-p/100);
+  const rim=(pct,label='5h')=>{ const p=Math.max(0,Math.min(100,Math.round(pct||0))), R=150, C=2*Math.PI*R, off=C*(1-p/100);
     return `<svg class="rim" viewBox="0 0 320 320" width="320" height="320" aria-hidden="true">`
       +`<circle cx="160" cy="160" r="${R}" fill="none" stroke="#231c10" stroke-width="4"/>`
       +(p>0?`<circle cx="160" cy="160" r="${R}" fill="none" stroke="${rimColor(p)}" stroke-width="4" stroke-linecap="round" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 160 160)"/>`:``)
-      +`</svg><div class="rimlabel">5h${p>0?" · "+p+"%":""}${snap.eta_mins?" · ~"+(snap.eta_mins>=60?Math.round(snap.eta_mins/60)+"h":snap.eta_mins+"m"):""}</div>`; };
+      +`</svg><div class="rimlabel">${label}${p>0?" · "+p+"%":""}${label==='5h'&&snap.eta_mins?" · ~"+(snap.eta_mins>=60?Math.round(snap.eta_mins/60)+"h":snap.eta_mins+"m"):""}</div>`; };
+  const fmtElapsed=s=>{ s=+s||0; if(s<60)return s+"s"; if(s<3600)return Math.floor(s/60)+"m"; return Math.floor(s/3600)+"h"+Math.floor((s%3600)/60)+"m"; };
+  // detail drill-in — mirrors the Dial's per-session view
+  function renderDetail(el,s){
+    const cp=s.context_pct||0, ctxCol=cp>=85?"var(--red)":cp>=70?"var(--amber-hot)":"var(--ink)";
+    const ctx=ftok(s.context_tokens)||"-", tot=ftok(s.total_tokens)||"-";
+    const cost=s.cost_usd?"$"+(+s.cost_usd).toFixed(2):"-", cache=s.cache_pct?s.cache_pct+"%":"-";
+    const f=s.sub_agents>0?["agents",s.sub_agents,"var(--amber)"]:(s.model?["model",esc(s.model),"var(--ink)"]:["agents","0","var(--grey)"]);
+    const tool=(s.tool_name||"").toLowerCase();
+    const stCol=s.stuck?"var(--red)":(s.state==="working"?"var(--amber)":"var(--hot)");
+    const sub=`${esc(s.state)}${tool?" - "+esc(tool):""}${s.stuck?" stuck?":""}`;
+    const elapsed=s.elapsed_secs?fmtElapsed(s.elapsed_secs)+" · ":"";
+    el.innerHTML=`<div class="crt"></div><div class="vig"></div>`+rim(cp,"ctx")
+      +`<div class="body"><div class="d-title">${esc(s.project||s.session_id.slice(0,10))}</div>`
+      +`<div class="d-sub" style="color:${stCol}">${sub}</div><div class="d-rule"></div>`
+      +`<div class="d-row"><span>context</span><b style="color:${ctxCol}">${ctx}</b></div>`
+      +`<div class="d-row"><span>total</span><b>${tot}</b></div>`
+      +`<div class="d-row"><span>cost</span><b style="color:var(--amber-hot)">${cost}</b></div>`
+      +`<div class="d-row"><span>cache</span><b>${cache}</b></div>`
+      +`<div class="d-row"><span>${f[0]}</span><b style="color:${f[2]}">${f[1]}</b></div>`
+      +`<div class="d-ft">${elapsed}click: back</div></div>`;
+  }
 
   async function decide(id,k){
     try{ await fetch("/decision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:id,decision:k})}); }catch(e){}
@@ -135,16 +163,24 @@
 
   function rotate(dir){
     rot+=dir*12; document.getElementById("knurl").style.setProperty("--rot",rot+"deg");
+    if(detailSid) return;
     const v=view();
     if(v==="perm"){ opt=(opt+dir+3)%3; render(); }
     else if(v==="roster"){ const n=roster().length; if(n){ caret=(caret+dir+n)%n; render(); } }
   }
   function press(){
+    if(detailSid){ detailSid=null; render(); return; }              // detail → back
     if(view()==="perm"){ const p=pending()[0]; if(p) decide(p.session_id, OPTS[opt].k); }
+    else if(view()==="roster"){ const s=roster()[caret]; if(s){ detailSid=s.session_id; render(); } }  // roster → drill in
   }
 
   function render(){
     const el=document.getElementById("screen");
+    if(detailSid){                                   // drill-in overlay for one session
+      const s=snap.sessions.find(x=>x.session_id===detailSid);
+      if(s){ renderDetail(el,s); return; }
+      detailSid=null;
+    }
     const v=view();
     let inner;
     if(v==="idle"){
@@ -163,7 +199,7 @@
         const tk=ftok(s.total_tokens);
         const cost=s.cost_usd?`<span class="cost">$${(+s.cost_usd).toFixed(2)}</span>`:'';
         const stuck=s.stuck?`<span class="stuck">stuck?</span>`:'';
-        return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}"><span class="car">▸</span><span class="nm" style="color:${pc}">${nm}</span>${tk?`<span class="tok">${tk}</span>`:''}${cost}${stuck}<span class="st">${g} ${m.l}</span></div>`;
+        return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}" data-sid="${s.session_id}"><span class="car">▸</span><span class="nm" style="color:${pc}">${nm}</span>${tk?`<span class="tok">${tk}</span>`:''}${cost}${stuck}<span class="st">${g} ${m.l}</span></div>`;
       }).join("");
       // today card: today $, diff, and the 24h activity strip
       const act=snap.activity||'';
@@ -189,7 +225,7 @@
       f.innerHTML=`<div class="disc" style="background:${ok?'#35D07F':'#FF5B34'}">${ok?'✓':'✗'}</div><div class="cap" style="color:${ok?'#35D07F':'#FF5B34'}">${esc(flashState.label||'')}</div>`;
       el.appendChild(f);
     }
-    el.querySelectorAll(".row[data-i]").forEach(r=>r.onclick=e=>{e.stopPropagation(); caret=+r.dataset.i; render();});
+    el.querySelectorAll(".row[data-i]").forEach(r=>r.onclick=e=>{e.stopPropagation(); caret=+r.dataset.i; detailSid=r.dataset.sid; render();});
     el.querySelectorAll(".opt[data-opt]").forEach(o=>o.onclick=e=>{e.stopPropagation(); opt=+o.dataset.opt; press();});
   }
 
