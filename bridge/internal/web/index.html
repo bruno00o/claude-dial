@@ -84,6 +84,16 @@
   .hints b{color:#a49a8a; font-weight:500;}
   .conn{font-size:11px; color:var(--grey);}
   .conn b{color:var(--amber);}
+  /* parity: per-project colour, cost, stuck, today card, activity strip, event flash */
+  .row .cost{font-size:10px; color:var(--dim); font-variant-numeric:tabular-nums; margin-left:5px;}
+  .row .stuck{font-size:10px; color:var(--red); margin-left:5px;}
+  .today{display:flex; justify-content:center; gap:10px; flex-wrap:wrap; font-size:10.5px; color:var(--dim); font-variant-numeric:tabular-nums; padding-top:9px;}
+  .today .over{color:var(--red);}
+  .act{display:flex; align-items:flex-end; justify-content:center; gap:1px; height:16px; margin-top:6px;}
+  .act i{width:4px; background:var(--amber); border-radius:1px; display:block;}
+  .flash{position:absolute; inset:0; z-index:20; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:#0a0805; border-radius:50%;}
+  .flash .disc{width:76px; height:76px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:40px; color:#0a0805;}
+  .flash .cap{font-size:18px; font-weight:500;}
   @media (prefers-reduced-motion: reduce){ *{animation:none !important;} }
 </style>
 </head>
@@ -97,8 +107,11 @@
   const spin=["⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷"];
   const OPTS=[{k:"allow_once",label:"allow once"},{k:"always_allow",label:"always allow"},{k:"reject",label:"reject",rej:true}];
   const stMeta={working:{c:"work",g:"spin",l:"working"},blocked:{c:"wait",g:"●",l:"waiting"},idle:{c:"",g:"·",l:"idle"},needs_input:{c:"wait",g:"●",l:"waiting"}};
+  // per-project palette — mirrors PROJECT_COLORS in the firmware
+  const PROJECT_COLORS=["#FFB000","#35D07F","#4FA3FF","#FF6FB5","#C77DFF","#00C2C7","#FF8A3D","#9BE564","#FFD23F","#7AA2FF","#FF5B6E","#B0B7C3"];
 
   let snap={sessions:[]}, caret=0, opt=0, rot=0, lastTop=null, connected=false;
+  let flashState=null, lastFlashEpoch=0;   // event glance-flash (commit / test)
 
   const pending=()=>snap.sessions.filter(s=>s.state==="permission_request");
   const roster=()=>snap.sessions.filter(s=>s.state!=="permission_request");
@@ -114,7 +127,7 @@
     return `<svg class="rim" viewBox="0 0 320 320" width="320" height="320" aria-hidden="true">`
       +`<circle cx="160" cy="160" r="${R}" fill="none" stroke="#231c10" stroke-width="4"/>`
       +(p>0?`<circle cx="160" cy="160" r="${R}" fill="none" stroke="${rimColor(p)}" stroke-width="4" stroke-linecap="round" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 160 160)"/>`:``)
-      +`</svg><div class="rimlabel">5h${p>0?" · "+p+"%":""}</div>`; };
+      +`</svg><div class="rimlabel">5h${p>0?" · "+p+"%":""}${snap.eta_mins?" · ~"+(snap.eta_mins>=60?Math.round(snap.eta_mins/60)+"h":snap.eta_mins+"m"):""}</div>`; };
 
   async function decide(id,k){
     try{ await fetch("/decision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:id,decision:k})}); }catch(e){}
@@ -139,15 +152,27 @@
     } else if(v==="roster"){
       const list=roster(); if(caret>=list.length) caret=0;
       const waits=list.filter(s=>s.state==="blocked"||s.state==="needs_input").length;
+      const working=list.filter(s=>s.state==="working").length;
+      const mood=waits?"var(--red)":(working?"var(--amber)":"var(--grey)");   // fleet weather
       const rows=list.map((s,i)=>{
         const m=stMeta[s.state]||stMeta.idle;
         let g=m.g==="spin"?`<span class="spinner">⣾</span>`:m.g;
-        if(s.errored) g=`<span style="color:#ff5555">${g}</span>`;   // error sniffer: red glyph
+        if(s.errored||s.stuck) g=`<span style="color:#ff5555">${g}</span>`;   // red glyph on error/stuck
         const nm=esc(s.project||s.session_id.slice(0,10));
+        const pc=PROJECT_COLORS[(s.color_idx||0)%12];                          // per-project colour
         const tk=ftok(s.total_tokens);
-        return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}"><span class="car">▸</span><span class="nm">${nm}</span>${tk?`<span class="tok">${tk}</span>`:''}<span class="st">${g} ${m.l}</span></div>`;
+        const cost=s.cost_usd?`<span class="cost">$${(+s.cost_usd).toFixed(2)}</span>`:'';
+        const stuck=s.stuck?`<span class="stuck">stuck?</span>`:'';
+        return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}"><span class="car">▸</span><span class="nm" style="color:${pc}">${nm}</span>${tk?`<span class="tok">${tk}</span>`:''}${cost}${stuck}<span class="st">${g} ${m.l}</span></div>`;
       }).join("");
-      inner=rim(snap.usage_pct)+`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n">${list.length}</span> session${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div><div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div></div>`;
+      // today card: today $, diff, and the 24h activity strip
+      const act=snap.activity||'';
+      const bars=act?`<div class="act">${[...act].map(c=>{const v=+c||0;return `<i style="height:${Math.max(1,Math.round(v*16/9))}px;opacity:${v>=6?1:(v?.6:.25)}"></i>`;}).join('')}</div>`:'';
+      const ts=[];
+      if(snap.today_cost)ts.push(`<span class="${snap.budget_pct>=100?'over':''}">today $${(+snap.today_cost).toFixed(2)}${snap.budget_pct>=100?' !':''}</span>`);
+      if(snap.diff_added||snap.diff_removed)ts.push(`+${snap.diff_added||0} -${snap.diff_removed||0} ${snap.diff_files||0}f`);
+      const today=(ts.length||bars)?`<div class="today">${ts.join(' · ')}</div>${bars}`:`<div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div>`;
+      inner=rim(snap.usage_pct)+`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n" style="color:${mood}">${list.length}</span> session${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div>${today}</div>`;
     } else {
       const q=pending(), p=q[0], behind=q.length-1;
       const opts=OPTS.map((o,i)=>`<div class="opt ${o.rej?'rej':''} ${i===opt?'sel':''}" data-opt="${i}"><span class="car">▸</span>${o.label}</div>`).join("");
@@ -158,6 +183,12 @@
       inner=`<div class="body"><div class="p-hd"><span>${esc(p.project||p.session_id.slice(0,10))}</span><span class="q">${behind>0?'⟨'+behind+' more⟩':'last'}</span></div><div class="p-warn">⚠ permission required</div><div class="p-cmd">$ <span class="d">${esc((p.tool_name||'').toLowerCase())}</span> ${esc(p.command)}</div>${usage}${opts}<div class="p-ft">↻ choose · ⏎ confirm<span class="cur"></span></div></div>`;
     }
     el.innerHTML=`<div class="crt"></div><div class="vig"></div>`+inner;
+    if(flashState && flashState.until>Date.now()){                 // event glance-flash overlay
+      const ok=flashState.ok;
+      const f=document.createElement("div"); f.className="flash";
+      f.innerHTML=`<div class="disc" style="background:${ok?'#35D07F':'#FF5B34'}">${ok?'✓':'✗'}</div><div class="cap" style="color:${ok?'#35D07F':'#FF5B34'}">${esc(flashState.label||'')}</div>`;
+      el.appendChild(f);
+    }
     el.querySelectorAll(".row[data-i]").forEach(r=>r.onclick=e=>{e.stopPropagation(); caret=+r.dataset.i; render();});
     el.querySelectorAll(".opt[data-opt]").forEach(o=>o.onclick=e=>{e.stopPropagation(); opt=+o.dataset.opt; press();});
   }
@@ -179,6 +210,11 @@
   ev.onerror=()=>{ connected=false; const c=document.getElementById("conn"); c.textContent="disconnected"; c.style.color="var(--red)"; };
   ev.onmessage=e=>{
     try{ snap=JSON.parse(e.data); }catch(_){ return; }
+    if(snap.event_epoch && snap.event_epoch!==lastFlashEpoch){      // commit / test → flash
+      lastFlashEpoch=snap.event_epoch;
+      flashState={until:Date.now()+2500, ok:snap.event!=="test_fail", label:snap.event_label};
+      setTimeout(render,2600);   // clear when it expires
+    }
     const top=pending()[0]; const id=top?top.session_id:null;
     if(id!==lastTop){ opt=0; lastTop=id; }
     render();
