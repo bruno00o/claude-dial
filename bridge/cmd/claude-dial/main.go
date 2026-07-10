@@ -20,6 +20,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -53,6 +54,8 @@ func main() {
 		cmdStatus(os.Args[2:])
 	case "firmware":
 		cmdFirmware(os.Args[2:])
+	case "cost":
+		cmdCost(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("claude-dial", version)
 	case "help", "--help", "-h":
@@ -77,6 +80,7 @@ func usage() {
   firmware status   show the Dial's firmware version and whether an update exists
   firmware update   flash the latest firmware to the Dial over BLE (already-flashed Dial)
   firmware flash    first flash of a blank Dial over USB (needs esptool)
+  cost              token + dollar-cost report from your transcripts (via ccusage)
   status            query a running daemon
   version
 `)
@@ -89,6 +93,9 @@ func cmdServe(args []string) {
 	idleAfter := fs.Duration("idle-after", 90*time.Second, "demote a silent working session to idle after this long")
 	useBLE := fs.Bool("ble", false, "also drive a physical M5Stack Dial over BLE")
 	usageBudget := fs.Int64("usage-budget", 0, "token budget for the 5h usage gauge (0 = auto-calibrate to your heaviest recent 5h)")
+	contextMax := fs.Int64("context-max", 1_000_000, "model max context window in tokens — the rim shows a session's context as a fraction of this")
+	dailyBudget := fs.Float64("daily-budget", 0, "daily spend target in USD (0 = off); the Dial shows today's $ and warns when you cross it")
+	notifyURL := fs.String("notify-url", "", "POST fleet mood (idle/working/needs_you) here on change — wire to Home Assistant, a webhook, a smart light")
 	debug := fs.Bool("debug", false, "log every hook event received")
 	_ = fs.Parse(args)
 
@@ -110,7 +117,7 @@ func cmdServe(args []string) {
 		}
 	}
 
-	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), BridgeVersion: version, UsageBudgetTokens: *usageBudget, Debug: *debug})
+	d := daemon.New(store, dev, daemon.Config{Timeout: *timeout, IdleAfter: *idleAfter, RulesPath: rulesPath(), AliasesPath: aliasesPath(), BridgeVersion: version, UsageBudgetTokens: *usageBudget, ContextMax: *contextMax, DailyBudget: *dailyBudget, NotifyURL: *notifyURL, Debug: *debug})
 
 	mux := http.NewServeMux()
 	hub.RegisterRoutes(mux)
@@ -471,6 +478,29 @@ func firmwareUpdate(port int, force bool) {
 	}
 }
 
+// cmdCost shells out to ccusage — the ccusage.approach the rim gauge is modeled
+// on (see README) — for a full token + dollar-cost breakdown read from Claude
+// Code's local transcripts. All args pass through, e.g. `claude-dial cost daily`,
+// `cost monthly`, `cost session`, `cost --json`. Prefers a ccusage already on
+// PATH; otherwise runs `npx -y ccusage@latest`.
+func cmdCost(args []string) {
+	name, full := "", []string(nil)
+	if p, err := exec.LookPath("ccusage"); err == nil {
+		name, full = p, args
+	} else if p, err := exec.LookPath("npx"); err == nil {
+		name, full = p, append([]string{"-y", "ccusage@latest"}, args...)
+	} else {
+		fmt.Fprintln(os.Stderr, "cost: needs `ccusage` or `npx` on your PATH.")
+		fmt.Fprintln(os.Stderr, "  install Node.js (which ships npx), or: npm i -g ccusage")
+		os.Exit(1)
+	}
+	cmd := exec.Command(name, full...)
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, os.Stdin
+	if err := cmd.Run(); err != nil {
+		os.Exit(1)
+	}
+}
+
 func defaultPort() int {
 	if v := os.Getenv("CLAUDE_DIAL_PORT"); v != "" {
 		var p int
@@ -490,6 +520,16 @@ func rulesPath() string {
 		return ""
 	}
 	return filepath.Join(dir, "claude-dial", "always-allow.json")
+}
+
+// aliasesPath is an optional JSON map of project-name → display-name, letting a
+// repo show a friendlier label on the dial (e.g. {"claude-dial":"dial"}).
+func aliasesPath() string {
+	dir, err := os.UserConfigDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(dir, "claude-dial", "names.json")
 }
 
 func check(err error) {

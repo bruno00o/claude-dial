@@ -56,20 +56,23 @@ type Device struct {
 	otaCtrlU, otaDataU, otaStatU bluetooth.UUID
 	debug                        bool
 
-	mu            sync.Mutex
-	rxChar        bluetooth.DeviceCharacteristic
-	hasRX         bool
-	connected     bool
-	conn          bluetooth.Device // current connection, for forcing a reconnect
-	hasConn       bool
-	firmware      string // version the Dial announced on connect ("" until it does)
-	otaCapable    bool   // firmware advertised OTA support in its hello
-	otaCtrl       bluetooth.DeviceCharacteristic
-	otaData       bluetooth.DeviceCharacteristic
-	hasOTA        bool   // all OTA characteristics were discovered
-	otaAdvertised string // last "update available" version pushed to the Dial (dedup)
-	lastUsagePct  int    // last usage gauge value pushed (-1 = none yet, forces first send)
-	last          map[string]protocol.SessionView
+	mu             sync.Mutex
+	rxChar         bluetooth.DeviceCharacteristic
+	hasRX          bool
+	connected      bool
+	conn           bluetooth.Device // current connection, for forcing a reconnect
+	hasConn        bool
+	firmware       string // version the Dial announced on connect ("" until it does)
+	otaCapable     bool   // firmware advertised OTA support in its hello
+	otaCtrl        bluetooth.DeviceCharacteristic
+	otaData        bluetooth.DeviceCharacteristic
+	hasOTA         bool   // all OTA characteristics were discovered
+	otaAdvertised  string // last "update available" version pushed to the Dial (dedup)
+	lastUsagePct   int    // last usage gauge value pushed (-1 = none yet, forces first send)
+	lastBudgetPct  int    // last daily-budget % pushed (-1 = none yet)
+	lastEventEpoch int64  // last event epoch flashed, so each event fires exactly once
+	lastRecentHash string // fingerprint of the recent-history set last sent
+	last           map[string]protocol.SessionView
 
 	wmu       sync.Mutex             // serializes all characteristic writes to the device
 	pending   chan protocol.Snapshot // coalescing hand-off to the writer goroutine
@@ -108,19 +111,20 @@ func New(debug bool) (*Device, error) {
 		return nil, err
 	}
 	d := &Device{
-		service:      svc,
-		rx:           rx,
-		tx:           tx,
-		otaCtrlU:     otaCtrl,
-		otaDataU:     otaData,
-		otaStatU:     otaStat,
-		debug:        debug,
-		lastUsagePct: -1, // force the first usage push even if it's 0
-		last:         map[string]protocol.SessionView{},
-		pending:      make(chan protocol.Snapshot, 1),
-		decisions:    make(chan protocol.Decision, 32),
-		otaStatus:    make(chan ota.Status, 16),
-		otaReqs:      make(chan struct{}, 1),
+		service:       svc,
+		rx:            rx,
+		tx:            tx,
+		otaCtrlU:      otaCtrl,
+		otaDataU:      otaData,
+		otaStatU:      otaStat,
+		debug:         debug,
+		lastUsagePct:  -1, // force the first usage push even if it's 0
+		lastBudgetPct: -1,
+		last:          map[string]protocol.SessionView{},
+		pending:       make(chan protocol.Snapshot, 1),
+		decisions:     make(chan protocol.Decision, 32),
+		otaStatus:     make(chan ota.Status, 16),
+		otaReqs:       make(chan struct{}, 1),
 	}
 	go d.run()
 	go d.writer()
@@ -262,6 +266,15 @@ func (d *Device) onNotify(buf []byte) {
 			d.mu.Lock()
 			d.firmware = hello.Firmware
 			d.otaCapable = hello.OTA
+			// A hello means the Dial just (re)booted with an empty session list —
+			// e.g. after a firmware flash. Forget what we think it shows so the next
+			// flush resends every session, instead of leaving it stuck on the idle
+			// screen because our diff says "nothing changed".
+			d.last = map[string]protocol.SessionView{}
+			d.lastUsagePct = -1
+			d.lastBudgetPct = -1
+			d.lastEventEpoch = 0
+			d.lastRecentHash = ""
 			d.mu.Unlock()
 			d.logf("dial firmware %s (ota=%v)", hello.Firmware, hello.OTA)
 		}
@@ -478,11 +491,22 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 	for _, s := range cur {
 		if p, exists := prev[s.SessionID]; !exists || !displayEqual(p, s) {
 			if d.write(protocol.Outbound{
-				SessionID: s.SessionID,
-				Project:   s.Project,
-				State:     s.State,
-				ToolName:  s.ToolName,
-				Command:   s.Command,
+				SessionID:     s.SessionID,
+				Project:       s.Project,
+				State:         s.State,
+				ToolName:      s.ToolName,
+				Command:       s.Command,
+				TotalTokens:   s.TotalTokens,   // piggybacked: not in displayEqual, so
+				ContextTokens: s.ContextTokens, // token drift alone never triggers a BLE write
+				ContextPct:    s.ContextPct,
+				SubAgents:     s.SubAgents,
+				CostUSD:       s.CostUSD,
+				Model:         s.Model,
+				Errored:       s.Errored,
+				ElapsedSecs:   s.ElapsedSecs,
+				CachePct:      s.CachePct,
+				Stuck:         s.Stuck,
+				ColorIdx:      s.ColorIdx,
 			}) {
 				d.mu.Lock()
 				d.last[s.SessionID] = s
@@ -495,18 +519,56 @@ func (d *Device) flush(snap protocol.Snapshot) bool {
 
 	// Usage gauge: push only when the percentage the Dial shows changes.
 	d.mu.Lock()
-	usageChanged := snap.UsagePct != d.lastUsagePct
+	usageChanged := snap.UsagePct != d.lastUsagePct || snap.BudgetPct != d.lastBudgetPct || snap.EventEpoch != d.lastEventEpoch
 	d.mu.Unlock()
 	if usageChanged {
-		if d.write(protocol.Outbound{Type: "usage", Pct: snap.UsagePct}) {
+		if d.write(protocol.Outbound{Type: "usage", Pct: snap.UsagePct, TodayCost: snap.TodayCost, BudgetPct: snap.BudgetPct,
+			EtaMins: snap.EtaMins, DiffAdded: snap.DiffAdded, DiffRemoved: snap.DiffRemoved, DiffFiles: snap.DiffFiles,
+			Event: snap.Event, EventLabel: snap.EventLabel, EventEpoch: snap.EventEpoch, Activity: snap.Activity,
+			ModelSpend: snap.ModelSpend}) {
 			d.mu.Lock()
 			d.lastUsagePct = snap.UsagePct
+			d.lastBudgetPct = snap.BudgetPct
+			d.lastEventEpoch = snap.EventEpoch
+			d.mu.Unlock()
+		} else {
+			ok = false
+		}
+	}
+
+	// Recent history: resend only when the SET of conversations changes (a hash of
+	// their ids), as a reset followed by one message each — cheap and non-chatty,
+	// so ages ticking every second don't reflood the device.
+	hash := recentHash(snap.Recent)
+	d.mu.Lock()
+	recentChanged := hash != d.lastRecentHash
+	d.mu.Unlock()
+	if recentChanged {
+		sent := d.write(protocol.Outbound{Type: "recent_reset"})
+		for _, r := range snap.Recent {
+			sent = d.write(protocol.Outbound{Type: "recent", Project: r.Project,
+				TotalTokens: r.Total, CostUSD: r.CostUSD, Model: r.Model, Errored: r.Errored}) && sent
+		}
+		if sent {
+			d.mu.Lock()
+			d.lastRecentHash = hash
 			d.mu.Unlock()
 		} else {
 			ok = false
 		}
 	}
 	return ok
+}
+
+// recentHash fingerprints the recent set by conversation id, so the history list
+// is resent to the device only when membership changes, not on every age tick.
+func recentHash(recent []protocol.RecentConv) string {
+	var b strings.Builder
+	for _, r := range recent {
+		b.WriteString(r.SessionID)
+		b.WriteByte('|')
+	}
+	return b.String()
 }
 
 // Connected reports whether a Dial is currently connected. Implements
@@ -547,7 +609,7 @@ func hostName() string {
 // takeover. So a "working" session whose command changes on every tool call looks
 // no different on screen — and must not cost a (slow, congestion-prone) BLE write.
 func displayEqual(a, b protocol.SessionView) bool {
-	if a.Project != b.Project || a.State != b.State {
+	if a.Project != b.Project || a.State != b.State || a.Stuck != b.Stuck {
 		return false
 	}
 	if a.State == protocol.StatePermission {

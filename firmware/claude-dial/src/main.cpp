@@ -38,6 +38,35 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
+// ── Premium anti-aliased type: JetBrains Mono embedded as VLW fonts ──────────
+// Three sizes replace the aliased built-in FreeMono, matching the web simulator.
+// Loaded ONCE in setup() into persistent VLWfont instances; each PointerWrapper
+// must outlive its font (VLWfont streams glyph bitmaps lazily from the flash
+// array on every drawChar). If a load ever fails, useS/M/L fall back to FreeMono
+// so a font problem can never blank the screen.
+#include "jbmono_s.h"   // 16 px
+#include "jbmono_m.h"   // 24 px
+#include "jbmono_l.h"   // 36 px
+static lgfx::VLWfont      fontS, fontM, fontL;     // 16 / 24 / 36 px
+static lgfx::PointerWrapper wrapS, wrapM, wrapL;
+static bool g_fontOK = false;
+static char g_fontMsg[48] = "fonts not init";
+static void initFonts() {
+  wrapS.set(jbmono_s, jbmono_s_len);
+  wrapM.set(jbmono_m, jbmono_m_len);
+  wrapL.set(jbmono_l, jbmono_l_len);
+  bool s = fontS.loadFont(&wrapS);
+  bool m = fontM.loadFont(&wrapM);
+  bool l = fontL.loadFont(&wrapL);
+  g_fontOK = s && m && l;
+  snprintf(g_fontMsg, sizeof(g_fontMsg), "VLW load S=%d M=%d L=%d", s, m, l);
+}
+// Font selectors (defined after `canvas` below): premium VLW when loaded,
+// graceful FreeMono fallback otherwise, so a font problem never blanks the screen.
+static inline void useS();
+static inline void useM();
+static inline void useL();
+
 // ── BLE UUIDs ────────────────────────────────────────────────────────────────
 #define SVC_UUID  "12345678-1234-1234-1234-123456789ABC"
 #define RX_UUID   "12345678-1234-1234-1234-123456789ABD"
@@ -62,12 +91,18 @@
 #define COL_HOT         ((uint32_t)0xFF7A18)   // needs-you / urgent — the 2nd temperature
 #define COL_AMBER_HOT   ((uint32_t)0xFFC46B)   // soft warning / usage mid-range
 #define COL_RED         ((uint32_t)0xFF5B34)   // reject
+#define COL_GREEN       ((uint32_t)0x35D07F)   // success flash (commit / tests pass)
+// Per-project palette: each repo hashes to one of these, for a colour dot on the roster.
+static const uint32_t PROJECT_COLORS[12] = {
+  0xFFB000, 0x35D07F, 0x4FA3FF, 0xFF6FB5, 0xC77DFF, 0x00C2C7,
+  0xFF8A3D, 0x9BE564, 0xFFD23F, 0x7AA2FF, 0xFF5B6E, 0xB0B7C3,
+};
 #define COL_RING        ((uint32_t)0x2A2318)   // dim bezel ring
 #define COL_ARC_OFF     ((uint32_t)0x140F08)   // spent countdown-arc dots
 #define COL_CONFIRM_BG  COL_BG
 
 // ── Types ────────────────────────────────────────────────────────────────────
-enum AppState { IDLE, SESSION_LIST, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION, RESET_CONFIRM };
+enum AppState { IDLE, SESSION_LIST, DETAIL, PERMISSION, CONFIRMING, MODE_MENU, BRIGHTNESS, CLOCK, OTA, OTA_PROMPT, FIRMWARE_INFO, SOUND, CONNECTION, RESET_CONFIRM, GLOBAL_STATS, HISTORY };
 
 struct Session {
   char  session_id[40];
@@ -75,6 +110,17 @@ struct Session {
   char  state[24];      // working | idle | blocked | permission_request
   char  tool_name[40];
   char  command[200];
+  long  total_tokens;   // cumulative "work" tokens for this conversation (0 = unknown)
+  long  context_tokens; // tokens resident in the context window now (0 = unknown)
+  int   context_pct;    // context as a % of the model max (for the rim, 0 = unknown)
+  int   sub_agents;     // Task sub-agents this conversation has spawned
+  float cost_usd;       // cumulative USD cost for this conversation
+  char  model[24];      // short model name, e.g. "sonnet-4-6"
+  bool  errored;        // the most recent tool call in this conversation failed
+  long  elapsed_secs;   // seconds since the bridge first saw this session
+  int   cache_pct;      // % of input tokens served from cache (the cache saver)
+  bool  stuck;          // working the same command too long (hung / loop)
+  int   color_idx;      // per-project colour palette index
   bool  active;
 };
 
@@ -126,6 +172,12 @@ static void drawBase();
 static void getTimeStr(char* tBuf, char* dBuf);
 static void drawIdle();
 static void drawSessionList();
+static void drawDetail();
+static void drawGlobalStats();
+static void drawHistory();
+static void drawEventFlash();
+static void wakeScreen();
+static void drawTracked(const char* s, int cx, int y, int extra);
 static void drawPermission();
 static void drawConfirming();
 static void drawModeMenu();
@@ -144,6 +196,20 @@ static AppState appState = IDLE;
 
 static Session sessions[MAX_SESSIONS];
 static int     sessionCount = 0;
+
+// Recently-finished conversations, newest first — captured as each session ends
+// so the "recent" screen can show what's done (a RAM ring; clears on reboot).
+struct HistEntry {
+  char  project[28];
+  long  total_tokens;
+  float cost_usd;
+  char  model[24];
+  bool  errored;
+};
+static const int HIST_MAX = 10;
+static HistEntry history[HIST_MAX];
+static int       histCount  = 0;
+static int       histScroll = 0;
 
 // Permission FIFO
 // PERM_TIMEOUT_MS matches the daemon's default --timeout (90s). If the two
@@ -164,6 +230,9 @@ static bool  permCmdOverflow = false;
 static int   menuChoice = 0;
 static long  lastEncoderPos = 0;
 static int   listScrollOffset = 0;
+static int   rosterSel = 0;            // selected roster row (index into the sorted list)
+static char  rosterSelSid[40] = {0};  // session id under the caret (set each roster draw)
+static char  detailSid[40] = {0};     // session shown in the DETAIL drill-in
 
 // Name of the bridge machine we're connected to (from set_time), shown on idle
 // so you can see which computer the Dial is driving. Cleared on disconnect.
@@ -174,6 +243,16 @@ static char  dialId[20] = "";
 // How full the 5h usage window is (0..100), pushed by the bridge — fills the
 // rim gauge. Cleared on disconnect.
 static int   usagePct = 0;
+static float todayCost = 0;   // today's spend (USD), from the usage message
+static int   budgetPct = 0;   // today's spend as % of the daily budget (0 = no budget)
+static int   etaMins   = 0;   // burn forecast: minutes until the 5h limit (0 = n/a)
+static int   diffAdded = 0, diffRemoved = 0, diffFiles = 0;  // today's edit volume
+static char  activity[26] = {0};     // 24h today heatmap, one char/hour ('0'..'9')
+static char  modelSpend[40] = {0};   // today's $ by model family, e.g. "opus $155"
+static uint32_t flashUntil = 0;      // event glance-flash active until this millis()
+static long     lastFlashEpoch = 0;  // dedup: flash each event epoch exactly once
+static char     flashKind[16] = {0};
+static char     flashLabel[24] = {0};
 
 // Display brightness (0-255), adjustable from the menu, persisted in NVS.
 static uint8_t   brightness = 180;
@@ -250,6 +329,11 @@ static QueueHandle_t         rxQueue = nullptr;
 
 // ── Display sprite ───────────────────────────────────────────────────────────
 static M5Canvas canvas(&M5Dial.Display);
+
+// Font selectors — premium VLW when loaded, graceful FreeMono fallback otherwise.
+static inline void useS() { if (g_fontOK) canvas.setFont(&fontS); else canvas.setFont(&fonts::FreeMono9pt7b);  }
+static inline void useM() { if (g_fontOK) canvas.setFont(&fontM); else canvas.setFont(&fonts::FreeMono12pt7b); }
+static inline void useL() { if (g_fontOK) canvas.setFont(&fontL); else canvas.setFont(&fonts::FreeMono18pt7b); }
 static const int CX = 120, CY = 120, CR = 120;
 
 // A quick colour circle grows from the center to full screen — a physical "look
@@ -290,6 +374,8 @@ static int newSession(const char* sid) {
 static void removeSession(const char* sid) {
   int idx = findSession(sid);
   if (idx >= 0) {
+    // (Recent history is now transcript-backed, pushed by the daemon as
+    // recent_reset/recent messages — no local capture on session end.)
     sessions[idx].active = false;
     if (sessionCount > 0) sessionCount--;
   }
@@ -433,7 +519,46 @@ static void handleRxMessage(const char* data, uint16_t len) {
     usagePct = doc["pct"] | 0;
     if (usagePct < 0) usagePct = 0;
     if (usagePct > 100) usagePct = 100;
+    todayCost   = doc["today_cost"]   | 0.0f;
+    budgetPct   = doc["budget_pct"]   | 0;
+    etaMins     = doc["eta_mins"]     | 0;
+    diffAdded   = doc["diff_added"]   | 0;
+    diffRemoved = doc["diff_removed"] | 0;
+    diffFiles   = doc["diff_files"]   | 0;
+    strlcpy(activity, doc["activity"] | "", sizeof(activity));
+    strlcpy(modelSpend, doc["model_spend"] | "", sizeof(modelSpend));
+    // one-shot glance-flash for a commit / test result — dedup by epoch
+    long evEpoch = doc["event_epoch"] | 0;
+    const char* evKind = doc["event"] | "";
+    if (evEpoch != 0 && evEpoch != lastFlashEpoch && evKind[0]) {
+      lastFlashEpoch = evEpoch;
+      strlcpy(flashKind, evKind, sizeof(flashKind));
+      strlcpy(flashLabel, doc["event_label"] | "", sizeof(flashLabel));
+      flashUntil = millis() + 2500;
+      wakeScreen();  // a celebration should wake the dial
+      playEarcon(strcmp(flashKind, "test_fail") == 0 ? SND_ERROR : SND_DONE);
+    }
     needsRedraw = true;
+    return;
+  }
+
+  // Control: transcript-backed recent history from the daemon. "recent_reset"
+  // clears the list, then one "recent" per conversation (newest first) rebuilds it.
+  if (strcmp(type, "recent_reset") == 0) {
+    histCount = 0; histScroll = 0;
+    if (appState == HISTORY) needsRedraw = true;
+    return;
+  }
+  if (strcmp(type, "recent") == 0) {
+    if (histCount < HIST_MAX) {
+      HistEntry& h = history[histCount++];
+      strlcpy(h.project, doc["project"] | "", sizeof(h.project));
+      h.total_tokens = doc["total_tokens"] | 0;
+      h.cost_usd     = doc["cost_usd"] | 0.0f;
+      strlcpy(h.model, doc["model"] | "", sizeof(h.model));
+      h.errored      = doc["errored"] | false;
+    }
+    if (appState == HISTORY) needsRedraw = true;
     return;
   }
 
@@ -474,6 +599,17 @@ static void handleRxMessage(const char* data, uint16_t len) {
   strlcpy(sessions[idx].state,     state, sizeof(sessions[idx].state));
   strlcpy(sessions[idx].tool_name, tool,  sizeof(sessions[idx].tool_name));
   strlcpy(sessions[idx].command,   cmd,   sizeof(sessions[idx].command));
+  sessions[idx].total_tokens   = doc["total_tokens"]   | 0L;   // omitted on the wire → 0 (unknown)
+  sessions[idx].context_tokens = doc["context_tokens"] | 0L;
+  sessions[idx].context_pct    = doc["context_pct"]    | 0;
+  sessions[idx].sub_agents     = doc["sub_agents"]     | 0;
+  sessions[idx].cost_usd       = doc["cost_usd"]       | 0.0f;
+  strlcpy(sessions[idx].model, doc["model"] | "", sizeof(sessions[idx].model));
+  sessions[idx].errored        = doc["errored"] | false;
+  sessions[idx].elapsed_secs   = doc["elapsed_secs"] | 0;
+  sessions[idx].cache_pct      = doc["cache_pct"]    | 0;
+  sessions[idx].stuck          = doc["stuck"]        | false;
+  sessions[idx].color_idx      = doc["color_idx"]    | 0;
 
   if (strcmp(state, "permission_request") == 0) {
     bool isNew = !permInQueue(sid) && strcmp(currentPermSid, sid) != 0;
@@ -609,10 +745,17 @@ static void sessionLabel(const Session& s, char* out, size_t n) {
   if (strlen(s.session_id) > 12 && n > 11) { out[10] = '.'; out[11] = '.'; out[12] = 0; }
 }
 
+// Compact token count for the tiny screen: 216k, 1.2M. Mirrors the web's ftok().
+static void fmtTokens(long v, char* out, size_t n) {
+  if (v >= 1000000)   snprintf(out, n, "%.1fM", v / 1000000.0);
+  else if (v >= 1000) snprintf(out, n, "%ldk", (v + 500) / 1000);
+  else                snprintf(out, n, "%ld", v);
+}
+
 static void drawBase() {
   canvas.fillScreen(COL_BG);
   canvas.fillCircle(CX, CY, CR - 1, COL_BG);
-  canvas.drawCircle(CX, CY, CR - 1, COL_RING);   // dim bezel only — no CRT gloss
+  canvas.fillArc(CX, CY, CR - 3, CR - 1, 0, 360, COL_RING);   // smooth AA bezel
 }
 
 // ── Round-screen text fitting ──────────────────────────────────────────────
@@ -658,6 +801,62 @@ static void drawDotRing(float frac, uint32_t on, uint32_t off, int count, int ra
   }
 }
 
+// Bold usage ring: a thick solid band from 12 o'clock clockwise — `frac` in `on`,
+// the rest in `off`. Same proven angle math as drawDotRing (0deg = top, clockwise)
+// but drawn as dense radial ticks so it reads as one solid arc, like the web rim.
+static void drawUsageArcBold(float frac, uint32_t on, uint32_t off) {
+  if (frac < 0) frac = 0;
+  if (frac > 1) frac = 1;
+  const int r0 = CR - 8, r1 = CR - 4;               // slim 4px band near the edge
+  // Anti-aliased ring via fillArc. Convention (fill_arc_helper, LGFXBase.cpp):
+  // 0deg = 3 o'clock, -90 = 12 o'clock, angle increases CLOCKWISE. So fill from
+  // the top clockwise. One AA call replaces 360 aliased radial ticks — smoother
+  // AND cheaper. (If a flash ever shows it running CCW, swap to 270-360*frac..270.)
+  canvas.fillArc(CX, CY, r0, r1, -90.0f, 270.0f, off);              // full dim track
+  if (frac > 0.0001f)
+    canvas.fillArc(CX, CY, r0, r1, -90.0f, -90.0f + frac * 360.0f, on);
+}
+
+// Context-gauge colour by fill: amber → warm → red as a conversation nears its
+// context limit (same temperature language as the rest of the UI).
+static uint32_t ctxColor(int pct) {
+  if (pct >= 85) return COL_RED;
+  if (pct >= 70) return COL_AMBER_HOT;
+  return COL_AMBER;
+}
+
+// Night mode: auto-dim the backlight during night hours (22:00–07:00) so the
+// object isn't a lamp on the desk overnight. It only scales down whatever
+// brightness the user set — never brighter — and only once the bridge has set
+// the clock (otherwise the RTC hour can't be trusted).
+static const int NIGHT_START = 22, NIGHT_END = 7;
+static int nightMode = 1;   // 0 = off, 1 = auto (by hour), 2 = always on
+static const char* NIGHT_LABELS[3] = { "off", "auto", "on" };
+static bool isNightHour() {
+  if (!hasEverConnected) return false;
+  int h = M5Dial.Rtc.getDateTime().time.hours;
+  return h >= NIGHT_START || h < NIGHT_END;   // window wraps midnight
+}
+static void applyBrightness() {
+  int b = brightness;
+  bool dim = (nightMode == 2) || (nightMode == 1 && isNightHour());
+  if (dim) b = b * 35 / 100;                   // dim to ~35%
+  if (b < 8) b = 8;
+  M5Dial.Display.setBrightness((uint8_t)b);
+}
+
+// Screen sleep — the real point of night mode. When night is active and nothing
+// has touched the dial for a while (and no session needs you), blank the screen
+// entirely. Any input, or an incoming permission, wakes it.
+static bool     screenAsleep    = false;
+static uint32_t lastInteraction = 0;
+static const uint32_t SLEEP_AFTER_MS = 25000;
+static bool nightActive() { return nightMode == 2 || (nightMode == 1 && isNightHour()); }
+static void wakeScreen() {
+  lastInteraction = millis();
+  if (screenAsleep) { screenAsleep = false; applyBrightness(); needsRedraw = true; }
+}
+
 // Gauge colour by how close the 5h window is to the cap: amber → hot → red.
 static uint32_t usageColor() {
   if (usagePct >= 85) return COL_RED;
@@ -674,18 +873,25 @@ static void getTimeStr(char* tBuf, char* dBuf) {
 static void drawIdle() {
   drawBase();
   // Rim gauge: fills with the 5h usage window (all-dim ambient bezel at 0%).
-  drawDotRing(usagePct / 100.0f, usageColor(), COL_ARC_OFF, 60, CR - 8);
+  drawUsageArcBold(usagePct / 100.0f, usageColor(), COL_ARC_OFF);   // smooth AA ring
+  if (usagePct > 0) {   // label the rim so it isn't mistaken for a context gauge
+    useS();
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    char rimLbl[12]; snprintf(rimLbl, sizeof(rimLbl), "5h %d%%", usagePct);
+    canvas.drawString(rimLbl, CX, 30);
+  }
 
   // Fresh out of the box: never paired since boot. Show how to set up the Mac
   // bridge instead of a clock stuck on the wrong time. Disappears for good once
   // the bridge connects the first time (see hasEverConnected).
   if (!bleConnected && !hasEverConnected) {
     canvas.setTextDatum(middle_center);
-    canvas.setFont(&fonts::FreeMono12pt7b);
+    useM();
     canvas.setTextColor(COL_AMBER, COL_BG);
     canvas.drawString("claude-dial", CX, CY - 58);
 
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
     canvas.drawString("not paired yet", CX, CY - 30);
     canvas.drawString("set up on your Mac", CX, CY - 6);
@@ -702,22 +908,22 @@ static void drawIdle() {
 
   canvas.setTextDatum(middle_center);
   canvas.setTextColor(COL_AMBER, COL_BG);
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();                            // premium VLW clock (de-risk: this screen first)
   canvas.drawString(tBuf, CX, CY - 14);
 
   int act = activeSessions();
   char status[40];
   if (!bleConnected)      strlcpy(status, "waiting for claude", sizeof(status));
-  else if (act > 0)       snprintf(status, sizeof(status), "%d agent%s", act, act > 1 ? "s" : "");
+  else if (act > 0)       snprintf(status, sizeof(status), "%d session%s", act, act > 1 ? "s" : "");
   else                    strlcpy(status, "waiting for claude", sizeof(status));
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString(status, CX, CY + 26);
 
   canvas.fillCircle(CX, CY + 50, 3, bleConnected ? COL_AMBER : COL_RING);
   if (bleConnected && hostName[0]) {           // which machine we're driving
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
     char hs[40], hf[40];
     hostShort(hostName, hs, sizeof(hs));
@@ -749,7 +955,6 @@ static int sessionRank(const Session& s) {
 
 static void drawSessionList() {
   drawBase();
-  drawDotRing(usagePct / 100.0f, usageColor(), COL_ARC_OFF, 60, CR - 8);   // usage gauge on the rim
 
   int active[MAX_SESSIONS], n = 0, waits = 0;
   for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -767,14 +972,46 @@ static void drawSessionList() {
     active[j + 1] = v;
   }
 
-  // header — "N agents" (dim, small)
-  canvas.setFont(&fonts::FreeMono9pt7b);
-  canvas.setTextDatum(middle_center);
+  // Clamp the selection and remember which session is under the caret, so a press
+  // can open its detail view (handlePress needs the sorted selection).
+  if (rosterSel >= n) rosterSel = n - 1;
+  if (rosterSel < 0)  rosterSel = 0;
+  if (n > 0) strlcpy(rosterSelSid, sessions[active[rosterSel]].session_id, sizeof(rosterSelSid));
+
+  // Rim gauge: the SELECTED conversation's context fill (out of the model max) —
+  // a meaningful per-session gauge that follows the caret, not a global quota.
+  int selCtx = (n > 0) ? sessions[active[rosterSel]].context_pct : 0;
+  drawUsageArcBold(selCtx / 100.0f, ctxColor(selCtx), COL_ARC_OFF);
+  if (n > 0 && selCtx > 0) {
+    useS();
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    char rimLbl[16]; snprintf(rimLbl, sizeof(rimLbl), "ctx %d%%", selCtx);
+    canvas.drawString(rimLbl, CX, 30);
+  }
+
+  // Fleet weather: the session count wears the aggregate mood — red when any
+  // session needs you (storm), amber when work is in flight, grey when all calm.
+  bool anyWorking = false;
+  for (int i = 0; i < n; i++)
+    if (strcmp(sessions[active[i]].state, "working") == 0) { anyWorking = true; break; }
+  uint32_t moodCol = waits > 0 ? COL_RED : (anyWorking ? COL_AMBER : COL_GRAY);
+
+  // header — masthead like the web roster: count (mood-coloured) + "session(s)"
+  // (dim) on the left, the clock (dim) on the right, with a hairline rule beneath.
+  useS();
+  const int hy = 50, hcw = canvas.textWidth("0");
+  char cnt[8]; snprintf(cnt, sizeof(cnt), "%d", n);
+  canvas.setTextDatum(middle_left);
+  canvas.setTextColor(moodCol, COL_BG);
+  canvas.drawString(cnt, CX - 88, hy);
   canvas.setTextColor(COL_DIM, COL_BG);
-  char hdr[24];
-  if (usagePct > 0) snprintf(hdr, sizeof(hdr), "%d agent%s  %d%%", n, n == 1 ? "" : "s", usagePct);
-  else              snprintf(hdr, sizeof(hdr), "%d agent%s", n, n == 1 ? "" : "s");
-  canvas.drawString(hdr, CX, 36);
+  canvas.drawString(n == 1 ? " session" : " sessions", CX - 88 + (int)strlen(cnt) * hcw, hy);
+  char tb[8]; { auto dt = M5Dial.Rtc.getDateTime(); snprintf(tb, sizeof(tb), "%02d:%02d", dt.time.hours, dt.time.minutes); }
+  canvas.setTextDatum(middle_right);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString(tb, CX + 88, hy);
+  canvas.drawFastHLine(CX - 84, hy + 14, 168, COL_RING);
 
   if (n == 0) {                 // no agents — the daemon switches us back to the clock
     canvas.pushSprite(0, 0);
@@ -782,11 +1019,14 @@ static void drawSessionList() {
   }
 
   const int visible = 4;
+  // Keep the selected row on screen (scroll follows the caret).
+  if (rosterSel < listScrollOffset) listScrollOffset = rosterSel;
+  if (rosterSel >= listScrollOffset + visible) listScrollOffset = rosterSel - visible + 1;
   if (listScrollOffset > n - visible) listScrollOffset = n - visible;
   if (listScrollOffset < 0) listScrollOffset = 0;
 
   const int startY = 74, rowH = 32;
-  canvas.setFont(&fonts::FreeMono9pt7b);   // rows in body size (labels + spinner)
+  useS();   // rows in body size (labels + spinner)
   for (int row = 0; row < visible && (listScrollOffset + row) < n; row++) {
     Session& s = sessions[active[listScrollOffset + row]];
     int y = startY + row * rowH;
@@ -807,36 +1047,61 @@ static void drawSessionList() {
       col = COL_GRAY;                     // idle
     }
 
+    bool sel = (listScrollOffset + row) == rosterSel;
     // Round-screen vignette: fade rows toward the rim by distance from center —
-    // but never the needs-you rows, which must stay bright wherever they land.
-    if (!waiting) {
+    // but never the needs-you rows, and never the selected row (both stay bright).
+    if (!waiting && !sel) {
       int f = 255 - abs(y - CY) * 2;
       if (f < 150) f = 150;
       col = dimColor(col, f, 255);
     }
 
-    char label[16], lf[20];
+    // per-conversation total tokens, right-aligned + dim (mirrors the web roster)
+    char tok[12] = "";
+    if (s.total_tokens > 0) fmtTokens(s.total_tokens, tok, sizeof(tok));
+    int cw = canvas.textWidth("0"); if (cw < 1) cw = 1;
+    const int tokRight = CX + 86;                    // right anchor, inside the chord on every row
+    int labelRight = tok[0] ? tokRight - (int)strlen(tok) * cw - 8 : CX + 90;
+
+    // project label, clipped to stop before the token column (round-screen room)
+    char label[24], lf[24];
     sessionLabel(s, label, sizeof(label));
-    fitChord(label, lf, sizeof(lf), CX - 70, y, 'L');   // clip to the row's chord
+    int maxN = (labelRight - (CX - 70)) / cw; if (maxN < 1) maxN = 1;
+    if ((size_t)maxN + 1 > sizeof(lf)) maxN = (int)sizeof(lf) - 1;
+    strlcpy(lf, label, (size_t)maxN + 1);
 
     canvas.setTextColor(col, COL_BG);
     canvas.setTextDatum(middle_left);
+    uint32_t gCol = (s.errored || s.stuck) ? COL_RED : col;  // red glyph on error or stuck
     if (waiting) {                                   // needs-you: a hot filled triangle
-      canvas.fillTriangle(CX - 90, y - 5, CX - 90, y + 5, CX - 82, y, col);
-    } else {                                         // working: spinner · idle: a dot
-      char glyph[2] = { working ? SPINNER[spinFrame] : '.', 0 };
-      canvas.drawString(glyph, CX - 88, y);
+      canvas.fillTriangle(CX - 90, y - 5, CX - 90, y + 5, CX - 82, y, gCol);
+    } else if (working) {                            // working: a smooth spinning C-arc
+      int base = spinFrame * 90;                       // advances each 150ms tick
+      canvas.fillArc(CX - 88, y, 3, 6, base, base + 270, gCol);
+    } else {                                          // idle: a soft AA dot
+      canvas.fillSmoothCircle(CX - 88, y, 2, gCol);
     }
+    canvas.setTextColor(PROJECT_COLORS[s.color_idx % 12], COL_BG);  // per-project colour identity
     canvas.drawString(lf, CX - 70, y);
+    if (tok[0]) {                                    // dim per-conversation token count
+      canvas.setTextDatum(middle_right);
+      canvas.setTextColor(COL_DIM, COL_BG);
+      canvas.drawString(tok, tokRight, y);
+    }
+    if (sel)                                         // selection caret (press to drill in)
+      canvas.fillTriangle(CX - 103, y - 4, CX - 103, y + 4, CX - 97, y, COL_AMBER);
   }
 
-  // footer — only shown when something actually needs you; silence otherwise
+  // footer — hint to drill in, or the count of sessions needing you
+  useS();
+  canvas.setTextDatum(middle_center);
   if (waits > 0) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
-    canvas.setTextDatum(middle_center);
     char ft[20]; snprintf(ft, sizeof(ft), "%d waiting", waits);
-    canvas.setTextColor(COL_HOT, COL_BG);   // match the hot "needs you" rows
+    canvas.setTextColor(COL_HOT, COL_BG);
     canvas.drawString(ft, CX, 208);
+  } else {
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("press: details", CX, 208);
   }
 
   // scroll dots
@@ -844,6 +1109,215 @@ static void drawSessionList() {
     for (int i = 0; i < n; i++) {
       uint32_t dc = (i >= listScrollOffset && i < listScrollOffset + visible) ? COL_AMBER : COL_RING;
       canvas.fillCircle(CX - (n * 6) / 2 + i * 6 + 3, 226, 2, dc);
+    }
+  }
+  canvas.pushSprite(0, 0);
+}
+
+// One "label ....... value" row in the detail view: label dim-left, value right.
+static void detailStat(int y, const char* label, const char* value, uint32_t vcol) {
+  useS();
+  canvas.setTextDatum(middle_left);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString(label, CX - 82, y);
+  canvas.setTextDatum(middle_right);
+  canvas.setTextColor(vcol, COL_BG);
+  canvas.drawString(value, CX + 82, y);
+}
+
+// DETAIL: the per-session drill-in reached by pressing a roster row. Shows what
+// that one conversation is doing — its context fill (also on the rim), spend, and
+// the sub-agents it has spawned — the "select a session, see its agents" view.
+// Compact elapsed readout: 45s / 4m / 1h20m.
+static void fmtElapsed(long s, char* buf, size_t n) {
+  if (s <= 0)        { buf[0] = 0; return; }
+  if (s < 60)        snprintf(buf, n, "%lds", s);
+  else if (s < 3600) snprintf(buf, n, "%ldm", s / 60);
+  else               snprintf(buf, n, "%ldh%ldm", s / 3600, (s % 3600) / 60);
+}
+
+static void drawDetail() {
+  int idx = findSession(detailSid);
+  if (idx < 0 || !sessions[idx].active) {   // the session ended while we were in here
+    appState = homeView();
+    needsRedraw = true;
+    return;
+  }
+  Session& s = sessions[idx];
+
+  drawBase();
+  drawUsageArcBold(s.context_pct / 100.0f, ctxColor(s.context_pct), COL_ARC_OFF);  // this session's context
+
+  // title — project name (medium, amber, clipped to the chord)
+  useM();
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(COL_AMBER, COL_BG);
+  char title[24], tf[24];
+  sessionLabel(s, title, sizeof(title));
+  fitChord(title, tf, sizeof(tf), CX, 46, 'C');
+  canvas.drawString(tf, CX, 46);
+
+  // state (+ tool in flight) — coloured by state
+  bool working = strcmp(s.state, "working") == 0;
+  bool waiting = strcmp(s.state, "blocked") == 0 || strcmp(s.state, "permission_request") == 0;
+  uint32_t stCol = working ? COL_AMBER : (waiting ? COL_HOT : COL_GRAY);
+  if (s.stuck) stCol = COL_RED;                    // stuck detector: flag a hung/looping session
+  char st[48], stf[32];
+  if (s.tool_name[0]) {
+    char tl[24]; strlcpy(tl, s.tool_name, sizeof(tl));
+    for (char* p = tl; *p; p++) *p = tolower(*p);
+    snprintf(st, sizeof(st), "%s - %s%s", s.state, tl, s.stuck ? " stuck?" : "");
+  } else {
+    snprintf(st, sizeof(st), "%s%s", s.state, s.stuck ? " stuck?" : "");
+  }
+  useS();
+  fitChord(st, stf, sizeof(stf), CX, 72, 'C');
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(stCol, COL_BG);
+  canvas.drawString(stf, CX, 72);
+
+  canvas.drawFastHLine(CX - 74, 88, 148, COL_RING);
+
+  // stats: context (reddens under pressure) / total / cost / cache / agents|model
+  char cbuf[16], tbuf[16], dbuf[16], abuf[12], chbuf[12];
+  if (s.context_tokens > 0) fmtTokens(s.context_tokens, cbuf, sizeof(cbuf)); else strlcpy(cbuf, "-", sizeof(cbuf));
+  if (s.total_tokens   > 0) fmtTokens(s.total_tokens,   tbuf, sizeof(tbuf)); else strlcpy(tbuf, "-", sizeof(tbuf));
+  if (s.cost_usd > 0)       snprintf(dbuf, sizeof(dbuf), "$%.2f", s.cost_usd); else strlcpy(dbuf, "-", sizeof(dbuf));
+  if (s.cache_pct > 0)      snprintf(chbuf, sizeof(chbuf), "%d%%", s.cache_pct); else strlcpy(chbuf, "-", sizeof(chbuf));
+  snprintf(abuf, sizeof(abuf), "%d", s.sub_agents);
+
+  // context-pressure alert: value goes warm ≥70%, red ≥85%, and the label gains a "!"
+  uint32_t ctxCol = s.context_pct >= 85 ? COL_RED : (s.context_pct >= 70 ? COL_AMBER_HOT : COL_INK);
+  detailStat(98,  s.context_pct >= 85 ? "context!" : "context", cbuf, ctxCol);
+  detailStat(118, "total", tbuf, COL_INK);
+  detailStat(138, "cost",  dbuf, COL_AMBER_HOT);
+  detailStat(158, "cache", chbuf, s.cache_pct >= 50 ? COL_AMBER : COL_INK);
+  if (s.sub_agents > 0)      detailStat(178, "agents", abuf, COL_AMBER);
+  else if (s.model[0])       detailStat(178, "model",  s.model, COL_INK);
+  else                       detailStat(178, "agents", abuf, COL_GRAY);
+
+  // footer: elapsed since first seen + back hint
+  char el[12], ft[28];
+  fmtElapsed(s.elapsed_secs, el, sizeof(el));
+  if (el[0]) snprintf(ft, sizeof(ft), "%s / press: back", el);
+  else       strlcpy(ft, "press: back", sizeof(ft));
+  useS();
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString(ft, CX, 200);
+  canvas.pushSprite(0, 0);
+}
+
+// GLOBAL_STATS: the "everything at a glance" screen (Settings > stats). Aggregates
+// what the device already holds — session count, total tokens and dollar cost
+// summed across all live conversations — with the global 5h quota on the rim.
+static void drawGlobalStats() {
+  drawBase();
+  drawUsageArcBold(usagePct / 100.0f, usageColor(), COL_ARC_OFF);
+  if (usagePct > 0) {
+    useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
+    char rl[20];   // burn forecast appended: "5h 21% ~7h"
+    if (etaMins >= 60)     snprintf(rl, sizeof(rl), "5h %d%% ~%dh", usagePct, etaMins / 60);
+    else if (etaMins > 0)  snprintf(rl, sizeof(rl), "5h %d%% ~%dm", usagePct, etaMins);
+    else                   snprintf(rl, sizeof(rl), "5h %d%%", usagePct);
+    canvas.drawString(rl, CX, 30);
+  }
+
+  int n = 0; long tokTotal = 0;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (!sessions[i].active) continue;
+    n++;
+    tokTotal += sessions[i].total_tokens;
+  }
+
+  useM(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_AMBER, COL_BG);
+  canvas.drawString("global", CX, 56);
+  canvas.drawFastHLine(CX - 62, 74, 124, COL_RING);
+
+  char sb[12], tb[16], yb[16];
+  snprintf(sb, sizeof(sb), "%d", n);
+  if (tokTotal  > 0) fmtTokens(tokTotal, tb, sizeof(tb));          else strlcpy(tb, "-", sizeof(tb));
+  if (todayCost > 0) snprintf(yb, sizeof(yb), "$%.2f", todayCost); else strlcpy(yb, "-", sizeof(yb));
+  // today $ shows a "!" and reddens once over the daily budget (bar dropped for the strip)
+  char yf[20]; snprintf(yf, sizeof(yf), "%s%s", yb, budgetPct >= 100 ? " !" : "");
+  detailStat(92,  "sessions", sb, COL_INK);
+  detailStat(110, "today",    yf, budgetPct >= 100 ? COL_RED : COL_AMBER);
+  (void)tb;  // tokens dropped from the today card in favour of the model breakdown
+
+  // today's spend by model family — "opus $155 · sonnet $80"
+  if (modelSpend[0]) {
+    useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString(modelSpend, CX, 128);
+  }
+  // diff of the day — today's edit volume (from Edit/Write tool inputs)
+  if (diffAdded > 0 || diffRemoved > 0) {
+    char dl[28]; snprintf(dl, sizeof(dl), "+%d -%d  %df", diffAdded, diffRemoved, diffFiles);
+    useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_AMBER, COL_BG);
+    canvas.drawString(dl, CX, 146);
+  }
+
+  // 24h activity strip — today's work rhythm (the "today card" signature)
+  if (activity[0]) {
+    const int baseY = 174, maxH = 16, bx0 = CX - 72;
+    for (int h = 0; h < 24; h++) {
+      int v = activity[h] - '0'; if (v < 0) v = 0; if (v > 9) v = 9;
+      int bh = v * maxH / 9;
+      if (bh <= 0) canvas.fillRect(bx0 + h * 6, baseY - 1, 4, 1, COL_RING);
+      else         canvas.fillRect(bx0 + h * 6, baseY - bh, 4, bh, v >= 6 ? COL_AMBER : COL_AMBER_HOT);
+    }
+  }
+
+  useS(); canvas.setTextDatum(middle_center); canvas.setTextColor(COL_DIM, COL_BG);
+  canvas.drawString("press: recent", CX, 194);
+  canvas.pushSprite(0, 0);
+}
+
+// HISTORY: recently-finished conversations (from the RAM ring), newest first,
+// scrolled with the encoder. Two lines per entry: project, then tokens/cost/model.
+static void drawHistory() {
+  drawBase();
+  useS();
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(COL_DIM, COL_BG);
+  drawTracked("RECENT", CX, 24, 3);
+
+  if (histCount == 0) {
+    canvas.setTextColor(COL_GRAY, COL_BG);
+    canvas.drawString("nothing finished yet", CX, CY);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString("press: back", CX, 200);
+    canvas.pushSprite(0, 0);
+    return;
+  }
+
+  const int visible = 3, startY = 62, rowH = 46;
+  if (histScroll > histCount - visible) histScroll = histCount - visible;
+  if (histScroll < 0) histScroll = 0;
+
+  for (int row = 0; row < visible && (histScroll + row) < histCount; row++) {
+    int i = histScroll + row;
+    int y = startY + row * rowH;
+    HistEntry &h = history[i];
+
+    char proj[16];
+    strlcpy(proj, h.project, sizeof(proj));   // truncate long names
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(h.errored ? COL_RED : COL_INK, COL_BG);
+    canvas.drawString(proj, CX, y);
+
+    char tk[12], sub[28];
+    if (h.total_tokens > 0) fmtTokens(h.total_tokens, tk, sizeof(tk)); else strlcpy(tk, "-", sizeof(tk));
+    if (h.cost_usd > 0) snprintf(sub, sizeof(sub), "%s / $%.2f", tk, h.cost_usd);
+    else                snprintf(sub, sizeof(sub), "%s", tk);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString(sub, CX, y + 17);
+  }
+
+  // scroll dots
+  if (histCount > visible) {
+    for (int i = 0; i < histCount; i++) {
+      uint32_t dc = (i >= histScroll && i < histScroll + visible) ? COL_AMBER : COL_RING;
+      canvas.fillCircle(CX - (histCount * 6) / 2 + i * 6 + 3, 214, 2, dc);
     }
   }
   canvas.pushSprite(0, 0);
@@ -894,7 +1368,7 @@ static void drawPermission() {
   Session& s = sessions[idx];
 
   drawBase();
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
 
   // Compose "$ tool command", wrap it fully, and flag risky commands (P5).
   bool danger = isDangerous(s.command);
@@ -921,7 +1395,7 @@ static void drawPermission() {
 
   // ── P2: full-screen command reader — scroll the whole command with the encoder
   if (permCmdView) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_center);
     canvas.setTextColor(danger ? COL_RED : COL_DIM, COL_BG);
     canvas.drawString(danger ? "! command" : "command", CX, 32);
@@ -929,13 +1403,13 @@ static void drawPermission() {
     const int visible = 6, top = 58, lh = 20;
     if (permCmdScroll > total - visible) permCmdScroll = total - visible;
     if (permCmdScroll < 0) permCmdScroll = 0;
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_left);
     canvas.setTextColor(cmdCol, COL_BG);
     for (int r = 0; r < visible && (permCmdScroll + r) < total; r++)
       canvas.drawString(lines[permCmdScroll + r], 22, top + r * lh);
 
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextDatum(middle_center);
     canvas.setTextColor(COL_DIM, COL_BG);
     if (total > visible) {
@@ -948,48 +1422,68 @@ static void drawPermission() {
   }
 
   // ── choices view ──
-  // project (who) + queue badge — small, dropped to y=42 where the chord is wider
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  // project (who) + queue badge. The who-label is hard-capped so wider VLW glyphs
+  // can never collide with the right-side badge (ends by ~CX+16).
+  useS();
   char who[16], wf[20]; sessionLabel(s, who, sizeof(who));
-  fitChord(who, wf, sizeof(wf), CX - 80, 42, 'L');
+  int cwv = canvas.textWidth("0"); if (cwv < 1) cwv = 1;
+  int whoCap = ((CX + 16) - (CX - 80)) / cwv; if (whoCap < 1) whoCap = 1;
+  if ((size_t)whoCap + 1 > sizeof(wf)) whoCap = sizeof(wf) - 1;
+  strlcpy(wf, who, (size_t)whoCap + 1);
   canvas.setTextDatum(middle_left);
   canvas.setTextColor(COL_AMBER, COL_BG);
-  canvas.drawString(wf, CX - 80, 42);
+  canvas.drawString(wf, CX - 80, 44);
   canvas.setTextDatum(middle_right);
   canvas.setTextColor(COL_DIM, COL_BG);
   if (permQueueCount > 0) {
     char more[14]; snprintf(more, sizeof(more), "<%d more>", permQueueCount);
-    canvas.drawString(more, CX + 80, 42);
+    canvas.drawString(more, CX + 82, 44);
   } else {
-    canvas.drawString("last", CX + 80, 42);
+    canvas.drawString("last", CX + 82, 44);
   }
 
   // eyebrow — warns when risky (small)
   canvas.setTextDatum(middle_center);
   canvas.setTextColor(danger ? COL_RED : COL_AMBER_HOT, COL_BG);
-  canvas.drawString(danger ? "! caution" : "permission", CX, 62);
+  canvas.drawString(danger ? "! caution" : "permission", CX, 66);
 
   // up to 3 command lines (body); when it overflows show 2 + a "tap to read" hint
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   int shown = permCmdOverflow ? 2 : total;
   canvas.setTextColor(cmdCol, COL_BG);
-  for (int r = 0; r < shown; r++) canvas.drawString(lines[r], CX, 88 + r * 18);
+  for (int r = 0; r < shown; r++) canvas.drawString(lines[r], CX, 90 + r * 20);
   if (permCmdOverflow) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
-    canvas.drawString(".. tap to read", CX, 124);
+    canvas.drawString(".. tap to read", CX, 130);
   }
 
-  // choices — body size, caret ">" on the selected one
-  canvas.setFont(&fonts::FreeMono9pt7b);
-  int btnY[3] = { 152, 176, 200 };
+  // per-conversation context fill — small + dim. Shown only when the command fits
+  // in <=2 lines, so it never collides with a 3rd command line.
+  if (s.context_tokens > 0 && total <= 2) {
+    char cn[24], ctxLine[32];
+    fmtTokens(s.context_tokens, cn, sizeof(cn));
+    snprintf(ctxLine, sizeof(ctxLine), "ctx %s", cn);
+    useS();
+    canvas.setTextDatum(middle_center);
+    canvas.setTextColor(COL_DIM, COL_BG);
+    canvas.drawString(ctxLine, CX, 134);
+  }
+
+  // choices — a filled AA pill on the selected one (red for reject), like the menu
+  useS();
+  canvas.setTextDatum(middle_center);
+  int btnY[3] = { 156, 180, 204 };
   for (int i = 0; i < 3; i++) {
     bool sel = (i == permChoice);
-    uint32_t col = !sel ? COL_GRAY : (i == 2 ? COL_RED : COL_AMBER);
-    char row[20];
-    snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", choiceLabels[i]);
-    canvas.setTextColor(col, COL_BG);
-    canvas.drawString(row, CX, btnY[i]);
+    if (sel) {
+      uint32_t pill = (i == 2) ? COL_RED : COL_AMBER;
+      canvas.fillSmoothRoundRect(CX - 78, btnY[i] - 11, 156, 22, 11, pill);
+      canvas.setTextColor(COL_BG, pill);      // text blends to the pill, not the bg
+    } else {
+      canvas.setTextColor(COL_GRAY, COL_BG);
+    }
+    canvas.drawString(choiceLabels[i], CX, btnY[i]);
   }
   canvas.pushSprite(0, 0);
 }
@@ -1011,23 +1505,23 @@ static void drawConfirming() {
   }
 
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("sending", CX, 86);
 
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(accent, COL_BG);
   canvas.drawString(choiceLabels[confirmChoice], CX, 116);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_INK, COL_BG);
   canvas.drawString("tap to undo", CX, 152);
   canvas.pushSprite(0, 0);
 }
 
-static const char* menuLabels[] = { "monitor", "brightness", "sound", "clock", "connection", "firmware", "reset" };
-static const int MENU_N   = 7;
-static const int MENU_GAP = 26;   // row pitch; tightened so 7 entries clear the title
+static const char* menuLabels[] = { "monitor", "display", "sound", "connection", "firmware", "stats", "reset" };
+static const int MENU_N   = 7;   // "display" merges brightness + clock + night mode
+static const int MENU_GAP = 26;   // row pitch (unused now the menu scrolls)
 
 // Draw a monospace string centred on cx with `extra` px between glyphs — the
 // wide-tracking "readout" look for the clock and uppercase labels. Font + colour
@@ -1065,20 +1559,20 @@ static void drawMenuIcon(int k, int x, int y, uint32_t col) {
       canvas.fillRect(x - 5, y - 2, 4, 5, col);
       canvas.drawArc(x + 4, y, 4, 5, -45, 45, col);
       break;
-    case 3:  // clock — a face with hands
-      canvas.drawCircle(x, y, 5, col);
-      canvas.drawLine(x, y, x, y - 3, col);
-      canvas.drawLine(x, y, x + 2, y + 1, col);
-      break;
-    case 4:  // connection — a signal dot with arcs
+    case 3:  // connection — a signal dot with arcs
       canvas.fillCircle(x, y, 2, col);
       canvas.drawArc(x, y, 5, 6, 40, 140, col);
       canvas.drawArc(x, y, 5, 6, 220, 320, col);
       break;
-    case 5:  // firmware — an up chevron on a stem
+    case 4:  // firmware — an up chevron on a stem
       canvas.drawLine(x - 4, y + 2, x, y - 4, col);
       canvas.drawLine(x, y - 4, x + 4, y + 2, col);
       canvas.drawLine(x, y - 4, x, y + 5, col);
+      break;
+    case 5:  // stats — three ascending bars
+      canvas.fillRect(x - 5, y + 1, 2, 4, col);
+      canvas.fillRect(x - 1, y - 2, 2, 7, col);
+      canvas.fillRect(x + 3, y - 5, 2, 10, col);
       break;
     case 6:  // reset — a refresh arc with an arrowhead
       canvas.drawArc(x, y, 4, 5, 300, 200, col);
@@ -1090,20 +1584,40 @@ static void drawMenuIcon(int k, int x, int y, uint32_t col) {
 
 static void drawModeMenu() {
   drawBase();
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
-  drawTracked("SETTINGS", CX, 22, 3);
+  canvas.setTextDatum(middle_center);
+  drawTracked("SETTINGS", CX, 24, 3);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
-  for (int i = 0; i < MENU_N; i++) {
+  // Scrolling window: the round screen can't show all entries at once, so show a
+  // few and scroll so the selection stays visible (mirrors the roster).
+  static int menuScroll = 0;
+  const int visible = 5;
+  if (menuChoice < menuScroll)               menuScroll = menuChoice;
+  if (menuChoice >= menuScroll + visible)    menuScroll = menuChoice - visible + 1;
+  if (menuScroll > MENU_N - visible)         menuScroll = MENU_N - visible;
+  if (menuScroll < 0)                        menuScroll = 0;
+
+  const int startY = 58, rowH = 30;
+  useS();
+  for (int row = 0; row < visible && (menuScroll + row) < MENU_N; row++) {
+    int i = menuScroll + row;
+    int y = startY + row * rowH;
     bool sel = (i == menuChoice);
-    int  y   = CY - (MENU_N - 1) * (MENU_GAP / 2) + i * MENU_GAP;   // vertically centered
-    if (sel) canvas.fillRoundRect(CX - 76, y - 11, 152, 22, 6, COL_AMBER);  // TUI highlight bar
+    if (sel) canvas.fillSmoothRoundRect(CX - 78, y - 12, 156, 24, 11, COL_AMBER);  // AA selection pill
     uint32_t fg = sel ? COL_BG : COL_GRAY;
     drawMenuIcon(i, CX - 58, y, fg);
     canvas.setTextColor(fg, sel ? COL_AMBER : COL_BG);   // opaque text over the pill
     canvas.setTextDatum(middle_left);
     canvas.drawString(menuLabels[i], CX - 42, y);
+  }
+
+  // scroll dots — one per entry, the visible window lit (mirrors the roster)
+  if (MENU_N > visible) {
+    for (int i = 0; i < MENU_N; i++) {
+      uint32_t dc = (i >= menuScroll && i < menuScroll + visible) ? COL_AMBER : COL_RING;
+      canvas.fillCircle(CX - (MENU_N * 6) / 2 + i * 6 + 3, 224, 2, dc);
+    }
   }
   canvas.pushSprite(0, 0);
 }
@@ -1124,16 +1638,16 @@ static void drawReset() {
   drawBase();
   canvas.setTextDatum(middle_center);
 
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(COL_RED, COL_BG);
   canvas.drawString("factory reset", CX, 64);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("wipes settings,", CX, 94);
   canvas.drawString("then restarts", CX, 112);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   const char* opts[2] = { "cancel", "reset" };
   for (int i = 0; i < 2; i++) {
     bool sel = (i == resetChoice);
@@ -1147,36 +1661,49 @@ static void drawReset() {
   canvas.pushSprite(0, 0);
 }
 
-static void drawBrightness() {
+static void drawBrightness() {   // the "display" screen: clock + brightness + night mode
   drawBase();
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+
+  // clock — grouped in here so the menu needs one "display" entry, not two
+  auto dt = M5Dial.Rtc.getDateTime();
+  char clk[8]; snprintf(clk, sizeof(clk), "%02d:%02d", dt.time.hours, dt.time.minutes);
+  useM();
+  canvas.setTextColor(COL_INK, COL_BG);
+  canvas.drawString(clk, CX, 44);
+
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("brightness", CX, 72);
+  canvas.drawString("brightness", CX, 76);
 
   char pct[8]; snprintf(pct, sizeof(pct), "%d%%", (brightness * 100) / 255);
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();
   canvas.setTextColor(COL_AMBER, COL_BG);
-  canvas.drawString(pct, CX, CY - 6);
+  canvas.drawString(pct, CX, 106);
 
-  int bw = 150, bh = 8, bx = CX - bw / 2, by = 150;
+  int bw = 150, bh = 8, bx = CX - bw / 2, by = 138;
   canvas.drawRoundRect(bx, by, bw, bh, 4, COL_RING);
   canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * brightness / 255, bh - 2, 3, COL_AMBER);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  // night mode — off / auto (by hour) / on
+  useS();
+  char nl[20]; snprintf(nl, sizeof(nl), "night  %s", NIGHT_LABELS[nightMode]);
+  canvas.setTextColor(nightMode ? COL_AMBER : COL_GRAY, COL_BG);
+  canvas.drawString(nl, CX, 168);
+
   canvas.setTextColor(COL_DIM, COL_BG);
-  canvas.drawString("turn / press", CX, 190);
+  canvas.drawString("tap night / hold back", CX, 196);
   canvas.pushSprite(0, 0);
 }
 
 static void drawSound() {
   drawBase();
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("sound", CX, 72);
 
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();
   if (soundVol == 0) {
     canvas.setTextColor(COL_GRAY, COL_BG);
     canvas.drawString("muted", CX, CY - 6);
@@ -1190,7 +1717,7 @@ static void drawSound() {
   canvas.drawRoundRect(bx, by, bw, bh, 4, COL_RING);
   if (soundVol) canvas.fillRoundRect(bx + 1, by + 1, (bw - 2) * soundVol / 255, bh - 2, 3, COL_AMBER);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("turn / press", CX, 190);
   canvas.pushSprite(0, 0);
@@ -1202,19 +1729,19 @@ static void drawConnection() {
   drawBase();
   canvas.setTextDatum(middle_center);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("connection", CX, 40);
 
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(bleConnected ? COL_AMBER : COL_GRAY, COL_BG);
   canvas.drawString(bleConnected ? "connected" : "scanning...", CX, 72);
 
   if (bleConnected && hostName[0]) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
     canvas.drawString("host", CX, 104);
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_INK, COL_BG);
     char hs[40], hf[40];
     hostShort(hostName, hs, sizeof(hs));
@@ -1223,7 +1750,7 @@ static void drawConnection() {
   }
 
   // this Dial's id (BLE address) — dim, at the bottom; short tail to fit the disc
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   char idbuf[16];
   if (dialId[0]) {
@@ -1254,7 +1781,7 @@ static void drawClock() {
   // Terminal readout: HH:MM:SS with live seconds and wide tracking.
   char tBuf[12];
   snprintf(tBuf, sizeof(tBuf), "%02d:%02d:%02d", dt.time.hours, dt.time.minutes, dt.time.seconds);
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();
   canvas.setTextColor(COL_AMBER, COL_BG);
   drawTracked(tBuf, CX, CY - 6, 1);
 
@@ -1266,7 +1793,7 @@ static void drawClock() {
   int wd = dayOfWeek(dt.date.year, mo, dt.date.date);
   char dBuf[20];
   snprintf(dBuf, sizeof(dBuf), "%s %02d %s %04d", WD[wd], dt.date.date, MO[mo - 1], dt.date.year);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   drawTracked(dBuf, CX, CY + 28, 2);
 
@@ -1280,6 +1807,9 @@ static void redraw() {
   switch (appState) {
     case IDLE:         drawIdle();         break;
     case SESSION_LIST: drawSessionList(); break;
+    case DETAIL:       drawDetail();      break;
+    case GLOBAL_STATS: drawGlobalStats(); break;
+    case HISTORY:      drawHistory();     break;
     case PERMISSION:   drawPermission();  break;
     case CONFIRMING:   drawConfirming();  break;
     case MODE_MENU:    drawModeMenu();    break;
@@ -1308,7 +1838,7 @@ static void drawOtaProgress() {
   }
 
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   char head[24];
   if (otaTargetVersion[0]) snprintf(head, sizeof(head), "installing %s", otaTargetVersion);
@@ -1316,11 +1846,11 @@ static void drawOtaProgress() {
   canvas.drawString(head, CX, 90);
 
   char pctStr[8]; snprintf(pctStr, sizeof(pctStr), "%u%%", pct);
-  canvas.setFont(&fonts::FreeMono18pt7b);
+  useL();
   canvas.setTextColor(COL_AMBER, COL_BG);
   canvas.drawString(pctStr, CX, 126);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("keep the dial close", CX, 162);
 
@@ -1332,16 +1862,16 @@ static void drawOtaPrompt() {
   drawBase();
   canvas.setTextDatum(middle_center);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("firmware update", CX, 56);
 
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(COL_AMBER, COL_BG);
   canvas.drawString(otaAvailVersion, CX, 86);
 
   if (otaStarting) {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_INK, COL_BG);
     canvas.drawString("starting..", CX, 140);
     canvas.pushSprite(0, 0);
@@ -1351,7 +1881,7 @@ static void drawOtaPrompt() {
   const char* opts[2] = { "install now", "later" };
   for (int i = 0; i < 2; i++) {
     bool sel = (otaPromptChoice == i);
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(sel ? COL_INK : COL_GRAY, COL_BG);
     char row[24]; snprintf(row, sizeof(row), "%s%s", sel ? "> " : "  ", opts[i]);
     canvas.drawString(row, CX, 130 + i * 26);
@@ -1364,25 +1894,25 @@ static void drawFirmwareInfo() {
   drawBase();
   canvas.setTextDatum(middle_center);
 
-  canvas.setFont(&fonts::FreeMono9pt7b);
+  useS();
   canvas.setTextColor(COL_DIM, COL_BG);
   canvas.drawString("firmware", CX, 60);
 
   char v[24]; snprintf(v, sizeof(v), "v%s", FW_VERSION);
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(COL_INK, COL_BG);
   canvas.drawString(v, CX, 90);
 
   if (otaAvailVersion[0]) {
     char u[28]; snprintf(u, sizeof(u), "update %s", otaAvailVersion);
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_AMBER, COL_BG);
     canvas.drawString(u, CX, 130);
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_DIM, COL_BG);
     canvas.drawString("press to install", CX, 156);
   } else {
-    canvas.setFont(&fonts::FreeMono9pt7b);
+    useS();
     canvas.setTextColor(COL_GRAY, COL_BG);
     canvas.drawString("up to date", CX, 138);
   }
@@ -1398,18 +1928,24 @@ static void handleEncoder(int delta) {
   // something, and not on SOUND — which previews the real volume level instead.
   switch (appState) {
     case SESSION_LIST: case PERMISSION: case MODE_MENU:
-    case OTA_PROMPT:   case BRIGHTNESS:  case RESET_CONFIRM:
+    case OTA_PROMPT:   case BRIGHTNESS:  case RESET_CONFIRM: case HISTORY:
       playEarcon(delta > 0 ? SND_TICK_CW : SND_TICK_CCW);
       break;
     default: break;
   }
 
   switch (appState) {
-    case SESSION_LIST:
-      listScrollOffset += (delta > 0) ? 1 : -1;
-      if (listScrollOffset < 0) listScrollOffset = 0;
+    case SESSION_LIST: {
+      // Move the selection caret (scroll follows it in drawSessionList).
+      int n = activeSessions();
+      if (n > 0) {
+        rosterSel += (delta > 0) ? 1 : -1;
+        if (rosterSel < 0)  rosterSel = 0;
+        if (rosterSel >= n) rosterSel = n - 1;
+      }
       needsRedraw = true;
       break;
+    }
     case PERMISSION:
       if (permCmdView) {                        // reader: scroll the command (clamped in draw)
         permCmdScroll += (delta > 0) ? 1 : -1;
@@ -1433,12 +1969,17 @@ static void handleEncoder(int delta) {
       resetChoice ^= 1;                       // toggle cancel <-> reset
       needsRedraw = true;
       break;
+    case HISTORY:
+      histScroll += (delta > 0) ? 1 : -1;     // scroll recent list (clamped in draw)
+      if (histScroll < 0) histScroll = 0;
+      needsRedraw = true;
+      break;
     case BRIGHTNESS: {
       int b = (int)brightness + (delta > 0 ? 12 : -12);
       if (b < 20)  b = 20;
       if (b > 255) b = 255;
       brightness = (uint8_t)b;
-      M5Dial.Display.setBrightness(brightness);
+      applyBrightness();   // honor night dim while adjusting
       needsRedraw = true;
       break;
     }
@@ -1459,10 +2000,37 @@ static void handleEncoder(int delta) {
 static void handlePress() {
   switch (appState) {
     case IDLE:
+      // Nothing to confirm on the clock. (Long-press opens the mode menu.)
+      break;
+
     case SESSION_LIST:
-      // Monitor views have nothing to confirm — the roster auto-shows when
-      // agents exist, and permission requests take over the screen on their own.
-      // (Long-press still opens the mode menu.)
+      // Drill into the selected conversation's detail view.
+      if (rosterSelSid[0]) {
+        strlcpy(detailSid, rosterSelSid, sizeof(detailSid));
+        playEarcon(SND_TICK);
+        appState    = DETAIL;
+        needsRedraw = true;
+      }
+      break;
+
+    case DETAIL:                             // back to the roster
+      playEarcon(SND_TICK);
+      appState    = homeView();
+      needsRedraw = true;
+      break;
+
+    case GLOBAL_STATS:                       // dive into the recent-history list
+      playEarcon(SND_TICK);
+      histScroll  = 0;
+      appState    = HISTORY;
+      needsRedraw = true;
+      break;
+
+    case HISTORY:                            // back to the settings menu
+      playEarcon(SND_TICK);
+      appState    = MODE_MENU;
+      menuChoice  = 5;                        // land on the "stats" entry
+      needsRedraw = true;
       break;
 
     case PERMISSION: {
@@ -1502,11 +2070,11 @@ static void handlePress() {
     case MODE_MENU:
       switch (menuChoice) {
         case 0: appState = homeView();    break;   // monitor — back to the main view
-        case 1: appState = BRIGHTNESS;    break;
+        case 1: appState = BRIGHTNESS;    break;   // "display" — brightness + clock + night
         case 2: appState = SOUND;         break;
-        case 3: appState = CLOCK;         break;
-        case 4: appState = CONNECTION;    break;
-        case 5: appState = FIRMWARE_INFO; break;
+        case 3: appState = CONNECTION;    break;
+        case 4: appState = FIRMWARE_INFO; break;
+        case 5: appState = GLOBAL_STATS;  break;
         case 6: appState = RESET_CONFIRM; resetChoice = 0; break;  // default to cancel
       }
       needsRedraw = true;
@@ -1536,10 +2104,10 @@ static void handlePress() {
       needsRedraw = true;
       break;
 
-    case BRIGHTNESS:                               // confirm — persist and back to menu
-      prefs.putUChar("bright", brightness);
-      appState    = MODE_MENU;
-      menuChoice  = 1;
+    case BRIGHTNESS:                               // display: tap cycles night mode
+      nightMode = (nightMode + 1) % 3;
+      prefs.putUChar("night", (uint8_t)nightMode);
+      applyBrightness();
       needsRedraw = true;
       break;
 
@@ -1631,11 +2199,14 @@ void setup() {
   pinMode(46, OUTPUT);
   digitalWrite(46, HIGH);          // POWER_HOLD: keep on when on battery/DC
 
+  Serial.begin(115200);            // USB CDC — boot/font diagnostics
+
   auto cfg = M5.config();
   M5Dial.begin(cfg, true, false);  // encoder on, RFID off
 
   prefs.begin("cdial", false);
   brightness = prefs.getUChar("bright", 180);
+  nightMode  = prefs.getUChar("night", 1);
   M5Dial.Display.setBrightness(0);   // stay dark until the boot fade-in
   soundVol = prefs.getUChar("vol", 128);
   M5Dial.Speaker.setVolume(soundVol);
@@ -1643,15 +2214,19 @@ void setup() {
   canvas.setColorDepth(16);          // RGB565 — set depth before allocating
   canvas.createSprite(240, 240);
 
+  initFonts();                       // load the embedded JetBrains Mono VLW faces
+  Serial.printf("[claude-dial] boot fw=%s  %s\n", FW_VERSION, g_fontMsg);
+
   // Soft boot fade-in (M5's touch): show a splash, then ramp the backlight up
   // instead of snapping on.
   drawBase();
   canvas.setTextDatum(middle_center);
-  canvas.setFont(&fonts::FreeMono12pt7b);
+  useM();
   canvas.setTextColor(COL_AMBER, COL_BG);
   canvas.drawString("claude-dial", CX, CY);
   canvas.pushSprite(0, 0);
   for (int b = 0; b <= brightness; b += 8) { M5Dial.Display.setBrightness(b); delay(12); }
+  applyBrightness();   // settle to the night-dimmed level if it's night
 
   M5Dial.Rtc.begin();
   memset(sessions, 0, sizeof(sessions));
@@ -1700,12 +2275,47 @@ void setup() {
 // ─────────────────────────────────────────────────────────────────────────────
 // loop()
 // ─────────────────────────────────────────────────────────────────────────────
+// A brief full-screen celebration when a commit lands or tests run: a coloured
+// disc with a check (green) or cross (red) and the caption.
+static void drawEventFlash() {
+  canvas.fillScreen(COL_BG);
+  bool milestone = strcmp(flashKind, "milestone") == 0;
+  bool ok = strcmp(flashKind, "test_fail") != 0;
+  uint32_t col = milestone ? COL_AMBER : (ok ? COL_GREEN : COL_RED);
+  int cx = CX, cy = CY - 14;
+  canvas.fillSmoothCircle(cx, cy, 36, col);
+  if (milestone) {                           // achievement: a six-point star (two triangles)
+    canvas.fillTriangle(cx, cy - 17, cx - 15, cy + 8, cx + 15, cy + 8, COL_BG);
+    canvas.fillTriangle(cx, cy + 17, cx - 15, cy - 8, cx + 15, cy - 8, COL_BG);
+  } else if (ok) {                           // check mark, in the bg colour
+    canvas.drawWideLine(cx - 15, cy + 1,  cx - 4, cy + 12, 4, COL_BG);
+    canvas.drawWideLine(cx - 4,  cy + 12, cx + 17, cy - 11, 4, COL_BG);
+  } else {                                   // cross
+    canvas.drawWideLine(cx - 13, cy - 13, cx + 13, cy + 13, 4, COL_BG);
+    canvas.drawWideLine(cx + 13, cy - 13, cx - 13, cy + 13, 4, COL_BG);
+  }
+  useM();
+  canvas.setTextDatum(middle_center);
+  canvas.setTextColor(col, COL_BG);
+  canvas.drawString(flashLabel, CX, CY + 48);
+  canvas.pushSprite(0, 0);
+}
+
 void loop() {
   M5Dial.update();
+
+  // Boot diagnostics: reprint font-load status each second for the first 15s so a
+  // serial monitor attached shortly after flashing always catches it.
+  static uint32_t lastBootPrint = 0;
+  if (millis() < 15000 && millis() - lastBootPrint > 1000) {
+    lastBootPrint = millis();
+    Serial.printf("[boot %lus] %s | ble=%d\n", millis() / 1000, g_fontMsg, (int)bleConnected);
+  }
 
   // Deferred "needs you" earcon (set from handleRxMessage, played off the BLE task)
   if (buzzPending) {
     buzzPending = false;
+    wakeScreen();                 // never sleep through a permission / needs-you
     playEarcon(SND_NEEDS_YOU);
   }
 
@@ -1774,27 +2384,45 @@ void loop() {
   long delta = pos - lastEncoderPos;
   if (delta != 0) {
     lastEncoderPos = pos;
-    encAccum += delta;
-    const long ENC_DETENT = 4;   // this encoder emits 4 counts per physical detent
-    while (encAccum >=  ENC_DETENT) { handleEncoder(+1); encAccum -= ENC_DETENT; }
-    while (encAccum <= -ENC_DETENT) { handleEncoder(-1); encAccum += ENC_DETENT; }
+    if (screenAsleep) { wakeScreen(); encAccum = 0; }   // first turn only wakes
+    else {
+      lastInteraction = millis();
+      encAccum += delta;
+      const long ENC_DETENT = 4;   // this encoder emits 4 counts per physical detent
+      while (encAccum >=  ENC_DETENT) { handleEncoder(+1); encAccum -= ENC_DETENT; }
+      while (encAccum <= -ENC_DETENT) { handleEncoder(-1); encAccum += ENC_DETENT; }
+    }
   }
 
   // Button: short click vs long hold, cleanly separated
   if (M5Dial.BtnA.wasClicked()) {
-    handlePress();
+    if (screenAsleep) wakeScreen();               // wake, don't act on the first press
+    else { lastInteraction = millis(); handlePress(); }
   }
   if (M5Dial.BtnA.wasHold()) {
-    if (appState != MODE_MENU && appState != BRIGHTNESS && appState != SOUND) {
-      appState    = MODE_MENU;
-      menuChoice  = 0;
-      needsRedraw = true;
+    if (screenAsleep) {
+      wakeScreen();
+    } else {
+      lastInteraction = millis();
+      if (appState == BRIGHTNESS) {                // display: hold saves brightness & exits
+        prefs.putUChar("bright", brightness);
+        appState    = MODE_MENU;
+        menuChoice  = 1;
+        needsRedraw = true;
+      } else if (appState != MODE_MENU && appState != SOUND) {
+        appState    = MODE_MENU;
+        menuChoice  = 0;
+        needsRedraw = true;
+      }
     }
   }
 
   // Touch: a tap (finger lifted) selects and fires the choice under it.
   auto tp = M5Dial.Touch.getDetail();
-  if (tp.wasClicked()) handleTouch(tp.x, tp.y);
+  if (tp.wasClicked()) {
+    if (screenAsleep) wakeScreen();
+    else { lastInteraction = millis(); handleTouch(tp.x, tp.y); }
+  }
 
   // Grace window elapsed with no undo -> the decision is finally sent.
   if (appState == CONFIRMING && (millis() - confirmStart) > CONFIRM_MS) {
@@ -1819,7 +2447,8 @@ void loop() {
 
   // Periodic redraws: idle clock (10s), permission countdown arc (1s), and the
   // roster spinner (~150ms, only while a session is "working").
-  static unsigned long lastSlow = 0, lastFast = 0;
+  static unsigned long lastSlow = 0, lastFast = 0, lastNight = 0;
+  if (millis() - lastNight > 30000) { lastNight = millis(); if (!screenAsleep) applyBrightness(); }  // night auto-dim
   if (appState == IDLE && millis() - lastSlow > 10000) {
     lastSlow = millis(); needsRedraw = true;
   }
@@ -1832,7 +2461,7 @@ void loop() {
   if (appState == CONFIRMING && millis() - lastFast > 100) {   // animate the undo arc
     lastFast = millis(); needsRedraw = true;
   }
-  if (appState == SESSION_LIST && millis() - lastFast > 150) {
+  if ((appState == SESSION_LIST || appState == DETAIL) && millis() - lastFast > 150) {
     lastFast = millis();
     bool anyWorking = false, anyWaiting = false;
     for (int i = 0; i < MAX_SESSIONS; i++) {
@@ -1845,6 +2474,48 @@ void loop() {
     if (anyWorking || anyWaiting) needsRedraw = true;     // spinner and/or the needs-you pulse
   }
 
-  if (needsRedraw) redraw();
+  // Screen sleep decision: wake instantly if a session needs you; otherwise, at
+  // night, blank the dial once it's been idle long enough.
+  bool needsYou = false;
+  for (int i = 0; i < MAX_SESSIONS; i++) {
+    if (sessions[i].active && (strcmp(sessions[i].state, "blocked") == 0 ||
+        strcmp(sessions[i].state, "permission_request") == 0)) { needsYou = true; break; }
+  }
+  if (screenAsleep && needsYou) {
+    wakeScreen();
+  } else if (!screenAsleep && nightActive() && !needsYou &&
+             appState != PERMISSION && appState != CONFIRMING &&
+             appState != OTA && appState != OTA_PROMPT &&
+             millis() - lastInteraction > SLEEP_AFTER_MS) {
+    M5Dial.Display.setBrightness(0);   // veille: screen off
+    screenAsleep = true;
+  }
+
+  // Breathing idle: a slow daylight backlight swell when the desk is calm — alive
+  // but not distracting. Night mode dims/sleeps instead, so only when not night.
+  static uint32_t lastBreath = 0;
+  static bool wasBreathing = false;
+  bool breathe = appState == IDLE && !screenAsleep && !nightActive() && !anyBusy;
+  if (breathe) {
+    if (millis() - lastBreath > 40) {
+      lastBreath = millis();
+      float k = 0.82f + 0.18f * (0.5f + 0.5f * sinf((millis() % 4000) / 4000.0f * 6.2832f));
+      int b = (int)(brightness * k); if (b < 8) b = 8;
+      M5Dial.Display.setBrightness((uint8_t)b);
+    }
+    wasBreathing = true;
+  } else if (wasBreathing) {
+    applyBrightness();   // restore the steady level when the calm ends
+    wasBreathing = false;
+  }
+
+  static bool wasFlashing = false;
+  if (millis() < flashUntil) {
+    drawEventFlash();                                  // celebration overrides the normal screen
+    wasFlashing = true;
+  } else {
+    if (wasFlashing) { wasFlashing = false; needsRedraw = true; }  // restore when it ends
+    if (needsRedraw && !screenAsleep) redraw();
+  }
   delay(10);
 }

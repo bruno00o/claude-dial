@@ -49,6 +49,16 @@
   .ft .w{color:var(--hot);}
   @keyframes pulse{0%,100%{opacity:.6;} 50%{opacity:1;}}
 
+  /* rim: the 5h usage gauge — above the vignette so the edge stays visible */
+  .rim{position:absolute; inset:0; z-index:6; pointer-events:none;}
+  .rimlabel{position:absolute; top:15px; left:50%; transform:translateX(-50%); z-index:7;
+    font-size:10px; letter-spacing:.2em; color:var(--dim); text-transform:uppercase;
+    font-variant-numeric:tabular-nums; pointer-events:none;}
+  /* per-conversation cumulative tokens on a roster row */
+  .row .tok{font-size:10.5px; color:var(--dim); font-variant-numeric:tabular-nums; margin-left:6px;}
+  .row.sel .tok{color:var(--amber-hot);}
+  .p-usage{font-size:11px; color:var(--dim); font-variant-numeric:tabular-nums; margin:-8px 0 12px;}
+
   /* permission */
   .p-hd{display:flex; justify-content:space-between; align-items:baseline; font-size:13.5px; color:var(--amber); text-shadow:0 0 8px rgba(255,166,43,.5); padding-bottom:6px;}
   .p-hd .q{font-size:11px; color:var(--dim); text-shadow:none;}
@@ -74,6 +84,30 @@
   .hints b{color:#a49a8a; font-weight:500;}
   .conn{font-size:11px; color:var(--grey);}
   .conn b{color:var(--amber);}
+  /* parity: per-project colour, cost, stuck, today card, activity strip, event flash */
+  .row .cost{font-size:10px; color:var(--dim); font-variant-numeric:tabular-nums; margin-left:5px;}
+  .row .stuck{font-size:10px; color:var(--red); margin-left:5px;}
+  .today{display:flex; justify-content:center; gap:10px; flex-wrap:wrap; font-size:10.5px; color:var(--dim); font-variant-numeric:tabular-nums; padding-top:9px;}
+  .today .over{color:var(--red);}
+  .act{display:flex; align-items:flex-end; justify-content:center; gap:1px; height:16px; margin-top:6px;}
+  .act i{width:4px; background:var(--amber); border-radius:1px; display:block;}
+  .flash{position:absolute; inset:0; z-index:20; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:14px; background:#0a0805; border-radius:50%;}
+  .flash .disc{width:76px; height:76px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:40px; color:#0a0805;}
+  .flash .cap{font-size:18px; font-weight:500;}
+  /* detail drill-in */
+  .d-title{font-size:21px; color:var(--amber); text-align:center; text-shadow:0 0 8px rgba(255,166,43,.5); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;}
+  .d-sub{font-size:12px; text-align:center; margin:3px 0 7px;}
+  .d-rule{height:1px; background:linear-gradient(90deg,transparent,#3a3327,transparent); margin:0 18px 6px;}
+  .d-row{display:flex; justify-content:space-between; font-size:14px; padding:2px 8px; color:var(--dim);}
+  .d-row b{font-weight:400; color:var(--ink); font-variant-numeric:tabular-nums;}
+  .d-ft{font-size:11px; color:var(--dim); text-align:center; margin-top:9px;}
+  /* recent history */
+  .todaycard{cursor:pointer;}
+  .rec-hd{font-family:"JetBrains Mono",monospace; font-size:12px; letter-spacing:.3em; color:var(--dim); text-align:center; padding-bottom:3px;}
+  .rec{display:flex; align-items:baseline; gap:7px; font-size:13px; padding:4px 6px; color:var(--grey);}
+  .rec .nm{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .rec-m{font-size:10.5px; color:var(--dim); font-variant-numeric:tabular-nums;}
+  .rec-a{font-size:10px; color:var(--grey); width:28px; text-align:right; font-variant-numeric:tabular-nums;}
   @media (prefers-reduced-motion: reduce){ *{animation:none !important;} }
 </style>
 </head>
@@ -87,14 +121,61 @@
   const spin=["⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷"];
   const OPTS=[{k:"allow_once",label:"allow once"},{k:"always_allow",label:"always allow"},{k:"reject",label:"reject",rej:true}];
   const stMeta={working:{c:"work",g:"spin",l:"working"},blocked:{c:"wait",g:"●",l:"waiting"},idle:{c:"",g:"·",l:"idle"},needs_input:{c:"wait",g:"●",l:"waiting"}};
+  // per-project palette — mirrors PROJECT_COLORS in the firmware
+  const PROJECT_COLORS=["#FFB000","#35D07F","#4FA3FF","#FF6FB5","#C77DFF","#00C2C7","#FF8A3D","#9BE564","#FFD23F","#7AA2FF","#FF5B6E","#B0B7C3"];
 
   let snap={sessions:[]}, caret=0, opt=0, rot=0, lastTop=null, connected=false;
+  let flashState=null, lastFlashEpoch=0, detailSid=null, showRecent=false;   // flash + drill-in + history
 
   const pending=()=>snap.sessions.filter(s=>s.state==="permission_request");
   const roster=()=>snap.sessions.filter(s=>s.state!=="permission_request");
   const view=()=>pending().length?"perm":(snap.sessions.length?"roster":"idle");
   const esc=s=>(s||"").replace(/[&<>]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;"}[c]));
   const clock=()=>{const d=new Date();return String(d.getHours()).padStart(2,"0")+":"+String(d.getMinutes()).padStart(2,"0");};
+  // format a raw token count compactly: 216k, 1.2M. Empty for 0 (omitempty on the wire).
+  const ftok=n=>{ n=+n||0; if(n<=0)return""; if(n>=1e6)return (n/1e6).toFixed(n<1e7?1:0)+"M"; if(n>=1e3)return Math.round(n/1e3)+"k"; return ""+n; };
+  const rimColor=p=>p>=85?"var(--red)":p>=70?"var(--amber-hot)":"var(--amber)";
+  // rim(pct): the 5h usage gauge as an arc from 12 o'clock, matching the firmware's
+  // amber→hot→red thresholds; labelled "5h" so it never reads as a context bar.
+  const rim=(pct,label='5h')=>{ const p=Math.max(0,Math.min(100,Math.round(pct||0))), R=150, C=2*Math.PI*R, off=C*(1-p/100);
+    return `<svg class="rim" viewBox="0 0 320 320" width="320" height="320" aria-hidden="true">`
+      +`<circle cx="160" cy="160" r="${R}" fill="none" stroke="#231c10" stroke-width="4"/>`
+      +(p>0?`<circle cx="160" cy="160" r="${R}" fill="none" stroke="${rimColor(p)}" stroke-width="4" stroke-linecap="round" stroke-dasharray="${C.toFixed(1)}" stroke-dashoffset="${off.toFixed(1)}" transform="rotate(-90 160 160)"/>`:``)
+      +`</svg><div class="rimlabel">${label}${p>0?" · "+p+"%":""}${label==='5h'&&snap.eta_mins?" · ~"+(snap.eta_mins>=60?Math.round(snap.eta_mins/60)+"h":snap.eta_mins+"m"):""}</div>`; };
+  const fmtElapsed=s=>{ s=+s||0; if(s<60)return s+"s"; if(s<3600)return Math.floor(s/60)+"m"; return Math.floor(s/3600)+"h"+Math.floor((s%3600)/60)+"m"; };
+  // detail drill-in — mirrors the Dial's per-session view
+  function renderDetail(el,s){
+    const cp=s.context_pct||0, ctxCol=cp>=85?"var(--red)":cp>=70?"var(--amber-hot)":"var(--ink)";
+    const ctx=ftok(s.context_tokens)||"-", tot=ftok(s.total_tokens)||"-";
+    const cost=s.cost_usd?"$"+(+s.cost_usd).toFixed(2):"-", cache=s.cache_pct?s.cache_pct+"%":"-";
+    const f=s.sub_agents>0?["agents",s.sub_agents,"var(--amber)"]:(s.model?["model",esc(s.model),"var(--ink)"]:["agents","0","var(--grey)"]);
+    const tool=(s.tool_name||"").toLowerCase();
+    const stCol=s.stuck?"var(--red)":(s.state==="working"?"var(--amber)":"var(--hot)");
+    const sub=`${esc(s.state)}${tool?" - "+esc(tool):""}${s.stuck?" stuck?":""}`;
+    const elapsed=s.elapsed_secs?fmtElapsed(s.elapsed_secs)+" · ":"";
+    el.innerHTML=`<div class="crt"></div><div class="vig"></div>`+rim(cp,"ctx")
+      +`<div class="body"><div class="d-title">${esc(s.project||s.session_id.slice(0,10))}</div>`
+      +`<div class="d-sub" style="color:${stCol}">${sub}</div><div class="d-rule"></div>`
+      +`<div class="d-row"><span>context</span><b style="color:${ctxCol}">${ctx}</b></div>`
+      +`<div class="d-row"><span>total</span><b>${tot}</b></div>`
+      +`<div class="d-row"><span>cost</span><b style="color:var(--amber-hot)">${cost}</b></div>`
+      +`<div class="d-row"><span>cache</span><b>${cache}</b></div>`
+      +`<div class="d-row"><span>${f[0]}</span><b style="color:${f[2]}">${f[1]}</b></div>`
+      +`<div class="d-ft">${elapsed}click: back</div></div>`;
+  }
+  // recent history — the daemon's transcript-backed conversation list
+  function renderRecent(el){
+    const list=snap.recent||[];
+    const fmtAge=s=>{s=+s||0; if(s<3600)return Math.max(1,Math.floor(s/60))+"m"; if(s<86400)return Math.floor(s/3600)+"h"; return Math.floor(s/86400)+"d";};
+    const rows=list.slice(0,8).map(r=>{
+      const meta=[ftok(r.total), r.cost_usd?"$"+(+r.cost_usd).toFixed(2):""].filter(Boolean).join(" · ");
+      return `<div class="rec"><span class="nm" style="color:${r.errored?'var(--red)':'var(--ink)'}">${esc(r.project||r.session_id.slice(0,8))}</span><span class="rec-m">${meta}</span><span class="rec-a">${fmtAge(r.age_secs)}</span></div>`;
+    }).join("");
+    el.innerHTML=`<div class="crt"></div><div class="vig"></div><div class="body">`
+      +`<div class="rec-hd">RECENT</div><div class="d-rule"></div>`
+      +(rows||`<div class="d-ft" style="margin-top:36px">nothing yet</div>`)
+      +`<div class="d-ft">click: back</div></div>`;
+  }
 
   async function decide(id,k){
     try{ await fetch("/decision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:id,decision:k})}); }catch(e){}
@@ -102,38 +183,76 @@
 
   function rotate(dir){
     rot+=dir*12; document.getElementById("knurl").style.setProperty("--rot",rot+"deg");
+    if(detailSid||showRecent) return;
     const v=view();
     if(v==="perm"){ opt=(opt+dir+3)%3; render(); }
     else if(v==="roster"){ const n=roster().length; if(n){ caret=(caret+dir+n)%n; render(); } }
   }
   function press(){
+    if(showRecent){ showRecent=false; render(); return; }           // recent → back
+    if(detailSid){ detailSid=null; render(); return; }              // detail → back
     if(view()==="perm"){ const p=pending()[0]; if(p) decide(p.session_id, OPTS[opt].k); }
+    else if(view()==="roster"){ const s=roster()[caret]; if(s){ detailSid=s.session_id; render(); } }  // roster → drill in
   }
 
   function render(){
     const el=document.getElementById("screen");
+    if(showRecent){ renderRecent(el); return; }      // history overlay
+    if(detailSid){                                   // drill-in overlay for one session
+      const s=snap.sessions.find(x=>x.session_id===detailSid);
+      if(s){ renderDetail(el,s); return; }
+      detailSid=null;
+    }
     const v=view();
     let inner;
     if(v==="idle"){
-      inner=`<div class="idle"><div class="clk">${clock()}</div><div class="sub">waiting for claude</div></div>`;
+      inner=rim(snap.usage_pct)+`<div class="idle"><div class="clk">${clock()}</div><div class="sub">waiting for claude</div></div>`;
     } else if(v==="roster"){
       const list=roster(); if(caret>=list.length) caret=0;
       const waits=list.filter(s=>s.state==="blocked"||s.state==="needs_input").length;
+      const working=list.filter(s=>s.state==="working").length;
+      const mood=waits?"var(--red)":(working?"var(--amber)":"var(--grey)");   // fleet weather
       const rows=list.map((s,i)=>{
         const m=stMeta[s.state]||stMeta.idle;
-        const g=m.g==="spin"?`<span class="spinner">⣾</span>`:m.g;
+        let g=m.g==="spin"?`<span class="spinner">⣾</span>`:m.g;
+        if(s.errored||s.stuck) g=`<span style="color:#ff5555">${g}</span>`;   // red glyph on error/stuck
         const nm=esc(s.project||s.session_id.slice(0,10));
-        return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}"><span class="car">▸</span><span class="nm">${nm}</span><span class="st">${g} ${m.l}</span></div>`;
+        const pc=PROJECT_COLORS[(s.color_idx||0)%12];                          // per-project colour
+        const tk=ftok(s.total_tokens);
+        const cost=s.cost_usd?`<span class="cost">$${(+s.cost_usd).toFixed(2)}</span>`:'';
+        const stuck=s.stuck?`<span class="stuck">stuck?</span>`:'';
+        return `<div class="row ${m.c} ${i===caret?'sel':''}" data-i="${i}" data-sid="${s.session_id}"><span class="car">▸</span><span class="nm" style="color:${pc}">${nm}</span>${tk?`<span class="tok">${tk}</span>`:''}${cost}${stuck}<span class="st">${g} ${m.l}</span></div>`;
       }).join("");
-      inner=`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n">${list.length}</span> agent${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div><div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div></div>`;
+      // today card: today $, diff, and the 24h activity strip
+      const act=snap.activity||'';
+      const bars=act?`<div class="act">${[...act].map(c=>{const v=+c||0;return `<i style="height:${Math.max(1,Math.round(v*16/9))}px;opacity:${v>=6?1:(v?.6:.25)}"></i>`;}).join('')}</div>`:'';
+      const ts=[];
+      if(snap.today_cost)ts.push(`<span class="${snap.budget_pct>=100?'over':''}">today $${(+snap.today_cost).toFixed(2)}${snap.budget_pct>=100?' !':''}</span>`);
+      if(snap.diff_added||snap.diff_removed)ts.push(`+${snap.diff_added||0} -${snap.diff_removed||0} ${snap.diff_files||0}f`);
+      if(snap.model_spend)ts.push(esc(snap.model_spend));
+      const today=(ts.length||bars)?`<div class="todaycard" title="recent history">${ts.length?`<div class="today">${ts.join(' · ')}</div>`:''}${bars}</div>`:`<div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div>`;
+      inner=rim(snap.usage_pct)+`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n" style="color:${mood}">${list.length}</span> session${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div>${today}</div>`;
     } else {
       const q=pending(), p=q[0], behind=q.length-1;
       const opts=OPTS.map((o,i)=>`<div class="opt ${o.rej?'rej':''} ${i===opt?'sel':''}" data-opt="${i}"><span class="car">▸</span>${o.label}</div>`).join("");
-      inner=`<div class="body"><div class="p-hd"><span>${esc(p.project||p.session_id.slice(0,10))}</span><span class="q">${behind>0?'⟨'+behind+' more⟩':'last'}</span></div><div class="p-warn">⚠ permission required</div><div class="p-cmd">$ <span class="d">${esc((p.tool_name||'').toLowerCase())}</span> ${esc(p.command)}</div>${opts}<div class="p-ft">↻ choose · ⏎ confirm<span class="cur"></span></div></div>`;
+      const ctx=ftok(p.context_tokens), tot=ftok(p.total_tokens);
+      const parts=[]; if(ctx)parts.push('ctx '+ctx); if(tot)parts.push(tot+' total');
+      if(p.cost_usd)parts.push('$'+(+p.cost_usd).toFixed(2)); if(p.model)parts.push(esc(p.model));
+      const usage=parts.length?`<div class="p-usage">${parts.join(' · ')}</div>`:'';
+      inner=`<div class="body"><div class="p-hd"><span>${esc(p.project||p.session_id.slice(0,10))}</span><span class="q">${behind>0?'⟨'+behind+' more⟩':'last'}</span></div><div class="p-warn">⚠ permission required</div><div class="p-cmd">$ <span class="d">${esc((p.tool_name||'').toLowerCase())}</span> ${esc(p.command)}</div>${usage}${opts}<div class="p-ft">↻ choose · ⏎ confirm<span class="cur"></span></div></div>`;
     }
     el.innerHTML=`<div class="crt"></div><div class="vig"></div>`+inner;
-    el.querySelectorAll(".row[data-i]").forEach(r=>r.onclick=e=>{e.stopPropagation(); caret=+r.dataset.i; render();});
+    if(flashState && flashState.until>Date.now()){                 // event glance-flash overlay
+      const ms=flashState.kind==="milestone";
+      const col=ms?'#FFB000':(flashState.ok?'#35D07F':'#FF5B34');
+      const glyph=ms?'★':(flashState.ok?'✓':'✗');
+      const f=document.createElement("div"); f.className="flash";
+      f.innerHTML=`<div class="disc" style="background:${col}">${glyph}</div><div class="cap" style="color:${col}">${esc(flashState.label||'')}</div>`;
+      el.appendChild(f);
+    }
+    el.querySelectorAll(".row[data-i]").forEach(r=>r.onclick=e=>{e.stopPropagation(); caret=+r.dataset.i; detailSid=r.dataset.sid; render();});
     el.querySelectorAll(".opt[data-opt]").forEach(o=>o.onclick=e=>{e.stopPropagation(); opt=+o.dataset.opt; press();});
+    el.querySelectorAll(".todaycard").forEach(t=>t.onclick=e=>{e.stopPropagation(); if((snap.recent||[]).length){showRecent=true; render();}});
   }
 
   const dev=document.getElementById("device");
@@ -153,6 +272,11 @@
   ev.onerror=()=>{ connected=false; const c=document.getElementById("conn"); c.textContent="disconnected"; c.style.color="var(--red)"; };
   ev.onmessage=e=>{
     try{ snap=JSON.parse(e.data); }catch(_){ return; }
+    if(snap.event_epoch && snap.event_epoch!==lastFlashEpoch){      // commit / test → flash
+      lastFlashEpoch=snap.event_epoch;
+      flashState={until:Date.now()+2500, ok:snap.event!=="test_fail", label:snap.event_label, kind:snap.event};
+      setTimeout(render,2600);   // clear when it expires
+    }
     const top=pending()[0]; const id=top?top.session_id:null;
     if(id!==lastTop){ opt=0; lastTop=id; }
     render();

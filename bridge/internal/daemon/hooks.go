@@ -23,6 +23,19 @@ type hookInput struct {
 	Cwd           string          `json:"cwd"`
 	ToolName      string          `json:"tool_name"`
 	ToolInput     json.RawMessage `json:"tool_input"`
+	// PermissionMode is Claude Code's current mode: "default" (asks the user),
+	// or an auto-approving mode — "acceptEdits", "auto", "plan", "dontAsk",
+	// "bypassPermissions". The dial only takes over a decision in "default".
+	PermissionMode string `json:"permission_mode"`
+}
+
+// autoApproves reports whether Claude Code's permission mode decides on its own
+// (so the dial should stay out of the way). Only "default" — the mode that asks
+// the user — warrants a tactile approval; every other mode auto-resolves. An
+// empty mode (older Claude Code that doesn't send it) is treated as "default"
+// so behaviour is unchanged there.
+func autoApproves(mode string) bool {
+	return mode != "" && mode != "default"
 }
 
 // hookOutput is the JSON a PreToolUse hook returns to steer the permission.
@@ -128,6 +141,17 @@ func (d *Daemon) handlePreToolUse(w http.ResponseWriter, r *http.Request, in hoo
 	project := projectName(in.Cwd)
 	command := extractCommand(in.ToolInput)
 
+	// Claude Code is in an auto-approving mode (acceptEdits/auto/bypass/plan/…):
+	// it decides on its own, so the dial must not take over the screen for a
+	// decision. Show the session as working and let Claude proceed — the tactile
+	// approval only fires in "default" (ask) mode.
+	if autoApproves(in.PermissionMode) {
+		d.store.Upsert(in.SessionID, project, protocol.StateWorking, in.ToolName, command)
+		d.broadcast()
+		writeEmpty(w)
+		return
+	}
+
 	// Already always-allowed for this session? Approve silently — no dial, no
 	// wait — and show the tool as running.
 	if d.rules.Allowed(in.SessionID, in.ToolName, command) {
@@ -187,14 +211,33 @@ func (d *Daemon) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	latest := d.fw.Latest().Version
 	newer := firmware.Newer(running, latest)
 	u := d.usage.Latest()
+	todayCost, budgetPct := d.todaySpend()
+	diff := d.usage.DiffToday()
+	ev := d.usage.LastEvent()
+	evAge := -1
+	if !ev.Time.IsZero() {
+		evAge = int(time.Since(ev.Time).Seconds())
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
 		"connected": d.dev.Connected(),
-		"sessions":  d.store.Snapshot(),
+		"sessions":  d.enrichedSessions(),
+		"recent":    d.recentConversations(10),
 		"usage": map[string]any{
-			"pct":    u.Pct(),
-			"tokens": u.Tokens,
-			"budget": u.Budget,
+			"pct":          u.Pct(),
+			"tokens":       u.Tokens,
+			"budget":       u.Budget,
+			"today_cost":   todayCost,
+			"budget_pct":   budgetPct,
+			"eta_mins":     u.EtaMins,
+			"diff_added":   diff.Added,
+			"diff_removed": diff.Removed,
+			"diff_files":   diff.Files,
+			"event":        ev.Kind,
+			"event_label":  ev.Label,
+			"event_age_s":  evAge,
+			"activity":     d.usage.Activity(),
+			"model_spend":  d.modelSpend(),
 		},
 		"firmware": map[string]any{
 			"running":                  running,
@@ -357,6 +400,28 @@ var (
 
 // projectName derives a stable, human label for a session from its cwd (the
 // basename of the nearest ancestor that looks like a project root), memoized by
+// projAliases maps a resolved project name to a user-chosen display name, loaded
+// once at startup. nil when none are configured.
+var projAliases map[string]string
+
+// loadAliases reads an optional JSON object of project-name → display-name (e.g.
+// {"claude-dial":"dial","5min-btc-polymarket":"btc"}) so a repo can wear a
+// friendlier label on the small screen. A missing or malformed file yields none.
+func loadAliases(path string) map[string]string {
+	if path == "" {
+		return nil
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil
+	}
+	var m map[string]string
+	if json.Unmarshal(b, &m) != nil {
+		return nil
+	}
+	return m
+}
+
 // cwd. The marker walk stats the filesystem and runs on the dense liveness
 // hooks, but a cwd's root never changes within a run, so each is resolved once.
 func projectName(cwd string) string {
@@ -369,6 +434,9 @@ func projectName(cwd string) string {
 		return n
 	}
 	n := resolveProject(cwd)
+	if a, ok := projAliases[n]; ok && a != "" {
+		n = a // user-chosen friendly name for this project
+	}
 	projCache[cwd] = n
 	return n
 }
@@ -428,3 +496,5 @@ func writeEmpty(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte("{}"))
 }
+
+// (autoApproves has a focused test in hooks_automode_test.go)
