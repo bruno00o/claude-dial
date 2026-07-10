@@ -2279,11 +2279,15 @@ void setup() {
 // disc with a check (green) or cross (red) and the caption.
 static void drawEventFlash() {
   canvas.fillScreen(COL_BG);
+  bool milestone = strcmp(flashKind, "milestone") == 0;
   bool ok = strcmp(flashKind, "test_fail") != 0;
-  uint32_t col = ok ? COL_GREEN : COL_RED;
+  uint32_t col = milestone ? COL_AMBER : (ok ? COL_GREEN : COL_RED);
   int cx = CX, cy = CY - 14;
   canvas.fillSmoothCircle(cx, cy, 36, col);
-  if (ok) {                                  // check mark, in the bg colour
+  if (milestone) {                           // achievement: a six-point star (two triangles)
+    canvas.fillTriangle(cx, cy - 17, cx - 15, cy + 8, cx + 15, cy + 8, COL_BG);
+    canvas.fillTriangle(cx, cy + 17, cx - 15, cy - 8, cx + 15, cy - 8, COL_BG);
+  } else if (ok) {                           // check mark, in the bg colour
     canvas.drawWideLine(cx - 15, cy + 1,  cx - 4, cy + 12, 4, COL_BG);
     canvas.drawWideLine(cx - 4,  cy + 12, cx + 17, cy - 11, 4, COL_BG);
   } else {                                   // cross

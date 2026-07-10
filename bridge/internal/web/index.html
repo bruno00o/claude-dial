@@ -243,9 +243,11 @@
     }
     el.innerHTML=`<div class="crt"></div><div class="vig"></div>`+inner;
     if(flashState && flashState.until>Date.now()){                 // event glance-flash overlay
-      const ok=flashState.ok;
+      const ms=flashState.kind==="milestone";
+      const col=ms?'#FFB000':(flashState.ok?'#35D07F':'#FF5B34');
+      const glyph=ms?'★':(flashState.ok?'✓':'✗');
       const f=document.createElement("div"); f.className="flash";
-      f.innerHTML=`<div class="disc" style="background:${ok?'#35D07F':'#FF5B34'}">${ok?'✓':'✗'}</div><div class="cap" style="color:${ok?'#35D07F':'#FF5B34'}">${esc(flashState.label||'')}</div>`;
+      f.innerHTML=`<div class="disc" style="background:${col}">${glyph}</div><div class="cap" style="color:${col}">${esc(flashState.label||'')}</div>`;
       el.appendChild(f);
     }
     el.querySelectorAll(".row[data-i]").forEach(r=>r.onclick=e=>{e.stopPropagation(); caret=+r.dataset.i; detailSid=r.dataset.sid; render();});
@@ -272,7 +274,7 @@
     try{ snap=JSON.parse(e.data); }catch(_){ return; }
     if(snap.event_epoch && snap.event_epoch!==lastFlashEpoch){      // commit / test → flash
       lastFlashEpoch=snap.event_epoch;
-      flashState={until:Date.now()+2500, ok:snap.event!=="test_fail", label:snap.event_label};
+      flashState={until:Date.now()+2500, ok:snap.event!=="test_fail", label:snap.event_label, kind:snap.event};
       setTimeout(render,2600);   // clear when it expires
     }
     const top=pending()[0]; const id=top?top.session_id:null;

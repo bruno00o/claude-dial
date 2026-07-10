@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -77,6 +78,66 @@ type Daemon struct {
 	// (idle / working / needs_you) — wire it to Home Assistant, a smart light, …
 	notifyURL string
 	lastMood  atomic.Value // string, the last mood POSTed (dedup)
+
+	// milestone (achievement) tracking — fired at most once per local day.
+	msMu    sync.Mutex
+	msDay   int
+	msFired map[string]bool
+}
+
+// milestones are the daily achievements celebrated with a glance-flash on the Dial.
+var milestones = []struct {
+	key, label, metric string
+	threshold          float64
+}{
+	{"diff10k", "10k lines today", "diff", 10000},
+	{"diff5k", "5000 lines today", "diff", 5000},
+	{"diff1k", "1000 lines today", "diff", 1000},
+	{"tok10m", "10M tokens today", "tokens", 10_000_000},
+	{"tok1m", "1M tokens today", "tokens", 1_000_000},
+	{"cost250", "$250 today", "cost", 250},
+	{"cost100", "$100 today", "cost", 100},
+	{"cost50", "$50 today", "cost", 50},
+}
+
+// checkMilestone returns the label of a milestone freshly crossed today (empty if
+// none). On a fresh day / startup it seeds the already-crossed ones without
+// celebrating, so only NEW crossings flash. Cheap; called on each broadcast.
+func (d *Daemon) checkMilestone() string {
+	diff := float64(d.usage.DiffToday().Added)
+	cost, _ := d.todaySpend()
+	tokens := float64(d.usage.TodayTokens())
+	val := func(metric string) float64 {
+		switch metric {
+		case "diff":
+			return diff
+		case "cost":
+			return cost
+		case "tokens":
+			return tokens
+		}
+		return 0
+	}
+	day := time.Now().YearDay()
+	d.msMu.Lock()
+	defer d.msMu.Unlock()
+	if day != d.msDay {
+		d.msDay = day
+		d.msFired = map[string]bool{}
+		for _, m := range milestones {
+			if val(m.metric) >= m.threshold {
+				d.msFired[m.key] = true // seed history — no celebration for it
+			}
+		}
+		return ""
+	}
+	for _, m := range milestones {
+		if !d.msFired[m.key] && val(m.metric) >= m.threshold {
+			d.msFired[m.key] = true
+			return m.label
+		}
+	}
+	return ""
 }
 
 // Config tunes the daemon.
@@ -387,6 +448,9 @@ func (d *Daemon) broadcast() {
 	evKind, evLabel, evEpoch := "", "", int64(0)
 	if ev.Kind != "" && time.Since(ev.Time) < 3*time.Minute {
 		evKind, evLabel, evEpoch = ev.Kind, ev.Label, ev.Time.Unix()
+	}
+	if ms := d.checkMilestone(); ms != "" { // a fresh achievement trumps the transcript event
+		evKind, evLabel, evEpoch = "milestone", ms, time.Now().Unix()
 	}
 	sessions := d.enrichedSessions()
 	d.maybeNotify(sessions)

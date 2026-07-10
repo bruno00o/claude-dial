@@ -238,12 +238,13 @@ type Reader struct {
 	dir    string
 	budget int64 // explicit override; <=0 self-calibrates
 
-	mu         sync.RWMutex
-	latest     Stats
-	perSession map[string]SessionUsage
-	diffToday  DiffToday
-	lastEvent  Event
-	activity   string // 24-char today heatmap, one char/hour ('0'..'9')
+	mu          sync.RWMutex
+	latest      Stats
+	perSession  map[string]SessionUsage
+	diffToday   DiffToday
+	lastEvent   Event
+	activity    string // 24-char today heatmap, one char/hour ('0'..'9')
+	todayTokens int64  // total work tokens since local midnight (for milestones)
 }
 
 // NewReader reads transcripts from dir (empty → ~/.claude/projects). budgetTokens
@@ -293,6 +294,13 @@ func (r *Reader) Activity() string {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.activity
+}
+
+// TodayTokens returns total work tokens since local midnight.
+func (r *Reader) TodayTokens() int64 {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.todayTokens
 }
 
 // Run refreshes now and then every interval until ctx is cancelled.
@@ -371,8 +379,9 @@ func (r *Reader) Refresh(now time.Time) error {
 			buckets[e.t.In(now.Location()).Hour()] += e.tok
 		}
 	}
-	var maxb int64
+	var maxb, todayTok int64
 	for _, b := range buckets {
+		todayTok += b
 		if b > maxb {
 			maxb = b
 		}
@@ -396,6 +405,7 @@ func (r *Reader) Refresh(now time.Time) error {
 	r.diffToday = diff
 	r.lastEvent = ev
 	r.activity = string(act)
+	r.todayTokens = todayTok
 	r.mu.Unlock()
 	return nil
 }
