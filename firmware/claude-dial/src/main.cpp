@@ -373,18 +373,8 @@ static int newSession(const char* sid) {
 static void removeSession(const char* sid) {
   int idx = findSession(sid);
   if (idx >= 0) {
-    // History: remember this finished conversation (newest first). Only real
-    // work is kept — an empty shell that never did anything isn't interesting.
-    if (sessions[idx].project[0] && sessions[idx].total_tokens > 0) {
-      int last = (histCount < HIST_MAX) ? histCount : HIST_MAX - 1;
-      for (int i = last; i > 0; i--) history[i] = history[i - 1];
-      strlcpy(history[0].project, sessions[idx].project, sizeof(history[0].project));
-      history[0].total_tokens = sessions[idx].total_tokens;
-      history[0].cost_usd     = sessions[idx].cost_usd;
-      strlcpy(history[0].model, sessions[idx].model, sizeof(history[0].model));
-      history[0].errored      = sessions[idx].errored;
-      if (histCount < HIST_MAX) histCount++;
-    }
+    // (Recent history is now transcript-backed, pushed by the daemon as
+    // recent_reset/recent messages — no local capture on session end.)
     sessions[idx].active = false;
     if (sessionCount > 0) sessionCount--;
   }
@@ -547,6 +537,26 @@ static void handleRxMessage(const char* data, uint16_t len) {
       playEarcon(strcmp(flashKind, "test_fail") == 0 ? SND_ERROR : SND_DONE);
     }
     needsRedraw = true;
+    return;
+  }
+
+  // Control: transcript-backed recent history from the daemon. "recent_reset"
+  // clears the list, then one "recent" per conversation (newest first) rebuilds it.
+  if (strcmp(type, "recent_reset") == 0) {
+    histCount = 0; histScroll = 0;
+    if (appState == HISTORY) needsRedraw = true;
+    return;
+  }
+  if (strcmp(type, "recent") == 0) {
+    if (histCount < HIST_MAX) {
+      HistEntry& h = history[histCount++];
+      strlcpy(h.project, doc["project"] | "", sizeof(h.project));
+      h.total_tokens = doc["total_tokens"] | 0;
+      h.cost_usd     = doc["cost_usd"] | 0.0f;
+      strlcpy(h.model, doc["model"] | "", sizeof(h.model));
+      h.errored      = doc["errored"] | false;
+    }
+    if (appState == HISTORY) needsRedraw = true;
     return;
   }
 
