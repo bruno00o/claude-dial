@@ -101,6 +101,13 @@
   .d-row{display:flex; justify-content:space-between; font-size:14px; padding:2px 8px; color:var(--dim);}
   .d-row b{font-weight:400; color:var(--ink); font-variant-numeric:tabular-nums;}
   .d-ft{font-size:11px; color:var(--dim); text-align:center; margin-top:9px;}
+  /* recent history */
+  .todaycard{cursor:pointer;}
+  .rec-hd{font-family:"JetBrains Mono",monospace; font-size:12px; letter-spacing:.3em; color:var(--dim); text-align:center; padding-bottom:3px;}
+  .rec{display:flex; align-items:baseline; gap:7px; font-size:13px; padding:4px 6px; color:var(--grey);}
+  .rec .nm{flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;}
+  .rec-m{font-size:10.5px; color:var(--dim); font-variant-numeric:tabular-nums;}
+  .rec-a{font-size:10px; color:var(--grey); width:28px; text-align:right; font-variant-numeric:tabular-nums;}
   @media (prefers-reduced-motion: reduce){ *{animation:none !important;} }
 </style>
 </head>
@@ -118,7 +125,7 @@
   const PROJECT_COLORS=["#FFB000","#35D07F","#4FA3FF","#FF6FB5","#C77DFF","#00C2C7","#FF8A3D","#9BE564","#FFD23F","#7AA2FF","#FF5B6E","#B0B7C3"];
 
   let snap={sessions:[]}, caret=0, opt=0, rot=0, lastTop=null, connected=false;
-  let flashState=null, lastFlashEpoch=0, detailSid=null;   // event flash + drill-in
+  let flashState=null, lastFlashEpoch=0, detailSid=null, showRecent=false;   // flash + drill-in + history
 
   const pending=()=>snap.sessions.filter(s=>s.state==="permission_request");
   const roster=()=>snap.sessions.filter(s=>s.state!=="permission_request");
@@ -156,6 +163,19 @@
       +`<div class="d-row"><span>${f[0]}</span><b style="color:${f[2]}">${f[1]}</b></div>`
       +`<div class="d-ft">${elapsed}click: back</div></div>`;
   }
+  // recent history — the daemon's transcript-backed conversation list
+  function renderRecent(el){
+    const list=snap.recent||[];
+    const fmtAge=s=>{s=+s||0; if(s<3600)return Math.max(1,Math.floor(s/60))+"m"; if(s<86400)return Math.floor(s/3600)+"h"; return Math.floor(s/86400)+"d";};
+    const rows=list.slice(0,8).map(r=>{
+      const meta=[ftok(r.total), r.cost_usd?"$"+(+r.cost_usd).toFixed(2):""].filter(Boolean).join(" · ");
+      return `<div class="rec"><span class="nm" style="color:${r.errored?'var(--red)':'var(--ink)'}">${esc(r.project||r.session_id.slice(0,8))}</span><span class="rec-m">${meta}</span><span class="rec-a">${fmtAge(r.age_secs)}</span></div>`;
+    }).join("");
+    el.innerHTML=`<div class="crt"></div><div class="vig"></div><div class="body">`
+      +`<div class="rec-hd">RECENT</div><div class="d-rule"></div>`
+      +(rows||`<div class="d-ft" style="margin-top:36px">nothing yet</div>`)
+      +`<div class="d-ft">click: back</div></div>`;
+  }
 
   async function decide(id,k){
     try{ await fetch("/decision",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({session_id:id,decision:k})}); }catch(e){}
@@ -163,12 +183,13 @@
 
   function rotate(dir){
     rot+=dir*12; document.getElementById("knurl").style.setProperty("--rot",rot+"deg");
-    if(detailSid) return;
+    if(detailSid||showRecent) return;
     const v=view();
     if(v==="perm"){ opt=(opt+dir+3)%3; render(); }
     else if(v==="roster"){ const n=roster().length; if(n){ caret=(caret+dir+n)%n; render(); } }
   }
   function press(){
+    if(showRecent){ showRecent=false; render(); return; }           // recent → back
     if(detailSid){ detailSid=null; render(); return; }              // detail → back
     if(view()==="perm"){ const p=pending()[0]; if(p) decide(p.session_id, OPTS[opt].k); }
     else if(view()==="roster"){ const s=roster()[caret]; if(s){ detailSid=s.session_id; render(); } }  // roster → drill in
@@ -176,6 +197,7 @@
 
   function render(){
     const el=document.getElementById("screen");
+    if(showRecent){ renderRecent(el); return; }      // history overlay
     if(detailSid){                                   // drill-in overlay for one session
       const s=snap.sessions.find(x=>x.session_id===detailSid);
       if(s){ renderDetail(el,s); return; }
@@ -207,7 +229,7 @@
       const ts=[];
       if(snap.today_cost)ts.push(`<span class="${snap.budget_pct>=100?'over':''}">today $${(+snap.today_cost).toFixed(2)}${snap.budget_pct>=100?' !':''}</span>`);
       if(snap.diff_added||snap.diff_removed)ts.push(`+${snap.diff_added||0} -${snap.diff_removed||0} ${snap.diff_files||0}f`);
-      const today=(ts.length||bars)?`<div class="today">${ts.join(' · ')}</div>${bars}`:`<div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div>`;
+      const today=(ts.length||bars)?`<div class="todaycard" title="recent history">${ts.length?`<div class="today">${ts.join(' · ')}</div>`:''}${bars}</div>`:`<div class="ft"><span class="${waits?'w':''}">${waits?waits+' waiting':''}</span><span>↻ ⏎ ✱</span></div>`;
       inner=rim(snap.usage_pct)+`<div class="body"><div class="hd"><span>claude <span style="color:var(--grey)">⟩</span> <span class="n" style="color:${mood}">${list.length}</span> session${list.length>1?'s':''}</span><span>${clock()}</span></div><div class="rule"></div><div class="rows">${rows}</div>${today}</div>`;
     } else {
       const q=pending(), p=q[0], behind=q.length-1;
@@ -227,6 +249,7 @@
     }
     el.querySelectorAll(".row[data-i]").forEach(r=>r.onclick=e=>{e.stopPropagation(); caret=+r.dataset.i; detailSid=r.dataset.sid; render();});
     el.querySelectorAll(".opt[data-opt]").forEach(o=>o.onclick=e=>{e.stopPropagation(); opt=+o.dataset.opt; press();});
+    el.querySelectorAll(".todaycard").forEach(t=>t.onclick=e=>{e.stopPropagation(); if((snap.recent||[]).length){showRecent=true; render();}});
   }
 
   const dev=document.getElementById("device");
